@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# sandbox-run: run a player's build inside bubblewrap, so it can't see or touch the rest of the machine.
+#
+#   sandbox-run [--gui] [--audio] [--wine] [--timeout SEC] <folder> [--] <command> [args...]
+#
+#   sandbox-run ~/terra-desk/builds/cryptx-release ./cryptx --help
+#   sandbox-run --wine ~/terra-desk/builds/bounding-box-release/windows wine bounding-box.exe
+#   sandbox-run --gui --wine ~/terra-desk/builds/mis-tulto-release wine Mis-tulto.exe --rendering-driver vulkan
+#
+# Inside the sandbox:
+#   - <folder> is the only thing it can write, mounted at /work (the command runs there). It must be a
+#     folder under $TERRA_SANDBOX_ROOT (your terra-desk workspace), not that folder itself.
+#   - no network at all (every namespace is unshared, including net)
+#   - no home folder: $HOME is /work/.sandbox-home, so no ssh keys, tokens, browser data or other projects
+#   - /usr and /etc are read-only, /tmp is empty and private, the environment is cleared
+#   - --wine: a separate Wine prefix in /work/.sandbox-home/.wine (made on first use), never ~/.wine;
+#     a bare .exe/.msi/.bat command gets "wine" put in front
+#   - --gui: passes the Wayland socket, Xwayland (for Wine) and /dev/dri (GPU) so a window can open.
+#     X11 lets a program see other X11 windows' input, so only use --gui for things you'd watch anyway
+#   - --audio: passes the PipeWire and PulseAudio sockets so it can play sound. Those sockets can also
+#     record from the mic, so only use it for things you'd watch anyway (never for agents)
+#   - --timeout SEC: kill it after SEC seconds (default: none)
+# It shares your kernel, so it doesn't protect against a kernel exploit; use the VM for anything that
+# looks actively malicious.
+set -euo pipefail
+
+gui=0 audio=0 wine=0 timeout_s=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gui) gui=1; shift ;;
+    --audio) audio=1; shift ;;
+    --wine) wine=1; shift ;;
+    --timeout) timeout_s="$2"; shift 2 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+root="$(realpath "${TERRA_SANDBOX_ROOT:-$HOME/terra-desk}")"
+work="$(realpath -e "$1")" || { echo "sandbox-run: no such folder: $1" >&2; exit 2; }
+shift
+[ "${1:-}" = "--" ] && shift
+case "$work/" in
+  "$root"/*/) ;;
+  *) echo "sandbox-run: the folder must be inside $root (and not $root itself): $work" >&2; exit 2 ;;
+esac
+[ -d "$work" ] || { echo "sandbox-run: not a folder: $work" >&2; exit 2; }
+
+mkdir -p "$work/.sandbox-home"
+args=(
+  --ro-bind /usr /usr
+  --symlink usr/lib /lib --symlink usr/lib /lib64 --symlink usr/bin /bin --symlink usr/bin /sbin
+  --ro-bind /etc /etc
+  --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home --tmpfs /run
+  --bind "$work" /work --chdir /work
+  --unshare-all --die-with-parent --new-session
+  --clearenv
+  --setenv PATH /usr/bin --setenv HOME /work/.sandbox-home
+  --setenv LANG "${LANG:-C.UTF-8}" --setenv TERM "${TERM:-xterm-256color}"
+)
+if [ "$wine" = 1 ]; then
+  args+=(--setenv WINEPREFIX /work/.sandbox-home/.wine --setenv WINEDEBUG -all)
+fi
+if [ "$gui" = 0 ]; then
+  args+=(--setenv XDG_RUNTIME_DIR /tmp)   # wine and friends want one; a private empty /tmp is fine
+fi
+if [ "$gui" = 1 ]; then
+  rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  args+=(--dir "$rt" --setenv XDG_RUNTIME_DIR "$rt")
+  if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$rt/$WAYLAND_DISPLAY" ]; then
+    args+=(--ro-bind "$rt/$WAYLAND_DISPLAY" "$rt/$WAYLAND_DISPLAY" --setenv WAYLAND_DISPLAY "$WAYLAND_DISPLAY")
+  fi
+  if [ -n "${DISPLAY:-}" ] && [ -d /tmp/.X11-unix ]; then
+    args+=(--ro-bind /tmp/.X11-unix /tmp/.X11-unix --setenv DISPLAY "$DISPLAY")
+    [ -n "${XAUTHORITY:-}" ] && [ -f "$XAUTHORITY" ] && args+=(--ro-bind "$XAUTHORITY" /tmp/.Xauthority --setenv XAUTHORITY /tmp/.Xauthority)
+  fi
+  [ -e /dev/dri ] && args+=(--dev-bind /dev/dri /dev/dri)
+  for n in /dev/nvidia*; do [ -e "$n" ] && args+=(--dev-bind "$n" "$n"); done
+  [ -d /sys ] && args+=(--ro-bind /sys /sys)
+fi
+if [ "$audio" = 1 ]; then
+  rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  # mounted under the sandbox's private /tmp so this works with or without --gui
+  if [ -S "$rt/pipewire-0" ]; then
+    args+=(--ro-bind "$rt/pipewire-0" /tmp/pipewire-0 --setenv PIPEWIRE_REMOTE /tmp/pipewire-0)
+  fi
+  if [ -S "$rt/pulse/native" ]; then
+    args+=(--ro-bind "$rt/pulse/native" /tmp/pulse-native --setenv PULSE_SERVER unix:/tmp/pulse-native)
+  fi
+fi
+
+# --wine with a bare .exe/.msi/.bat: run it with wine (leaving "wine" out is the usual slip)
+if [ "$wine" = 1 ] && [[ "${1,,}" =~ \.(exe|msi|bat)$ ]]; then
+  set -- wine "$@"
+fi
+
+if [ -n "$timeout_s" ]; then
+  exec timeout --kill-after=5 "$timeout_s" bwrap "${args[@]}" "$@"
+fi
+exec bwrap "${args[@]}" "$@"

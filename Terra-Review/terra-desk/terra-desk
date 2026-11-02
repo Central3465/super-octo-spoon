@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Starts terra-desk. Needs Python 3.11+ with PySide6 (Arch: pacman -S pyside6, elsewhere: pip install PySide6).
+here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+cd "$here" && exec python3 -m terra_desk "$@"
