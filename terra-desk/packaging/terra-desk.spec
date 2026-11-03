@@ -11,7 +11,6 @@ ROOT = Path(SPECPATH).parent          # noqa: F821 - SPECPATH is set by PyInstal
 
 datas = [
     (str(ROOT / 'terra_desk' / 'web'), 'terra_desk/web'),
-    (str(ROOT / 'terra_desk' / 'fonts'), 'terra_desk/fonts'),
     (str(ROOT / 'tools' / 'terra-api.py'), 'tools'),
     (str(ROOT / 'tools' / 'terra-write.py'), 'tools'),
 ]

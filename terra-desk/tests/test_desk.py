@@ -79,7 +79,7 @@ def test_templates():
     from terra_desk import core
     a = core.template('approve', '@me')
     assert a.startswith('### Verdict\napprove') and 'if you have any questions DM @me' in a
-    assert len(core.template_problems(a)) == 3
+    assert len(core.template_problems(a)) == 8
     assert 'reship and we\'ll take another look!' in core.template('changes', '@me')
     assert core.draft_fields(core.template('reject', '@me'))['verdict'] == 'reject'
     with pytest.raises(ValueError):
@@ -742,7 +742,7 @@ def test_web_app(cfg, monkeypatch, tmp_path):
     s = desk.by_key[SID]
     assert s.verdict_kind == 'approve' and 'danger flag acknowledgement' in s.fields
     code, d = call('GET', f'/api/ship/{SID}')
-    assert d['badge'] == 'approve' and d['cut'] == 0 and 'voters suggest x1.14' in d['hints'] and d['template_left']
+    assert d['badge'] == 'Approve' and d['cut'] == 0 and 'voters suggest x1.14' in d['hints'] and d['template_left']
     assert call('POST', f'/api/ship/{SID}/draft', {'multiplier': 1.3, 'cut': 0, 'fields': {}})[1] == {'saved': True}
     assert desk.by_key[SID].fields['multiplier'] == '1.3'
     approve_draft = desk.by_key[SID].draft
@@ -751,7 +751,7 @@ def test_web_app(cfg, monkeypatch, tmp_path):
     assert desk.by_key[SID].fields['deflation reason'] == 'half the time was a tutorial'
     desk.set_draft(SID, '### Verdict\napprove\n\n### Multiplier\n1.3\n\n### Note to player\nnice, i took 2h off')
     code, d = call('GET', f'/api/ship/{SID}')
-    assert d['cut'] == 2.0 and {'key': 'deflation reason', 'text': 'Fraud review: too fast', 'player': False} in d['fields']
+    assert d['cut'] == 2.0 and {'key': 'deflation reason', 'label': 'Deflation reason', 'text': 'Fraud review: too fast', 'player': False} in d['fields']
     call('POST', f'/api/ship/{SID}/draft', {'multiplier': 1.3, 'cut': 2, 'fields': {'note to player': 'nice!'}})
     f = desk.by_key[SID].fields
     assert f['airtable deflation (hours)'] == '2' and f['deflation reason'] == 'Fraud review: too fast' and f['note to player'] == 'nice!'
@@ -777,7 +777,7 @@ def test_web_app(cfg, monkeypatch, tmp_path):
     call('POST', '/api/settings/general', {'handle': '@me', 'terminal': '', 'window': 'browser'})
     assert core.load_config()['handle'] == '@me' and core.load_config()['window'] == 'browser'
     st = call('GET', '/api/settings')[1]
-    assert [t['name'] for t in st['templates']] == ['Approve', 'Request changes', 'Reject']
+    assert [t['name'] for t in st['templates']] == ['Approve', 'Request changes', 'Reject', 'Move review']
     call('POST', '/api/settings/text', {'key': 'template-reject', 'text': '### Verdict\nreject\n\n### Note to player\nno, {handle}'})
     assert 'no, @me' in core.template('reject', '@me', desk.cfg)
     assert call('POST', '/api/settings/text', {'key': 'template-reject', 'reset': True})[1]['text'] == core.default_template('reject')
@@ -832,7 +832,7 @@ def test_web_server_guards(cfg, monkeypatch):
         with urllib.request.urlopen(base + '/') as r:
             page = r.read().decode()
             assert key in page and "script-src 'self'" in r.headers['Content-Security-Policy']
-        for path in ('/static/app.js', '/static/app.css', '/static/fonts/Archivo.ttf', '/static/icon.svg'):
+        for path in ('/static/app.js', '/static/app.css', '/static/icon.svg'):
             with urllib.request.urlopen(base + path) as r:
                 assert r.status == 200
         with pytest.raises(urllib.error.HTTPError) as e:
@@ -856,3 +856,29 @@ def test_web_server_guards(cfg, monkeypatch):
     finally:
         httpd.shutdown()
         desk.shutdown()
+
+
+def test_move_verdict_and_rubric(cfg, monkeypatch):
+    from terra_desk import core, server
+    monkeypatch.setattr(core, 'fetch_page', lambda store, tools, sid, max_age=600: (store.set_page(sid, page_data(sid)), page_data(sid))[1])
+    monkeypatch.setattr(core, 'run_checks', lambda cfg, tools, store, sid: {})
+    desk = server.Desk(cfg)
+    call = server.test_client(desk)
+    desk.store.sync_queue({SID: queue_item()})
+    desk.reload()
+    r = call('GET', '/api/rubric')[1]
+    assert [v['kind'] for v in r['verdicts']] == ['approve', 'changes', 'reject', 'move']
+    assert [m['value'] for m in r['multipliers']][:2] == [0.8, 0.9] and 'note to player' in r['fields']
+    call('POST', f'/api/ship/{SID}/notes', {'notes': 'sus'})
+    call('POST', f'/api/ship/{SID}/verdict', {'kind': 'move'})
+    s = desk.by_key[SID]
+    assert s.verdict_kind == 'move' and s.fields['verdict'] == 'move to fraud' and 'move note' in s.fields
+    d = call('GET', f'/api/ship/{SID}')[1]
+    assert d['badge'] == 'Move review' and d['move_to'] == 'fraud' and d['template_left_all']
+    call('POST', f'/api/ship/{SID}/draft', {'move_to': 'admin', 'fields': {'move note': 'hours look copied from another project'}})
+    s = desk.by_key[SID]
+    assert s.fields['verdict'] == 'move to admin' and s.fields['move note'] == 'hours look copied from another project'
+    assert core.template_problems(s.draft) == []
+    changes = core.template('changes', '@me')
+    assert len(core.template_problems(changes)) == 3          # the liked-thing line and both numbered problems
+    assert core.template_problems('### What to change\nthe boss fight is really cool\n1. add a release. build it') == []

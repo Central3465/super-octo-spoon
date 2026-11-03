@@ -20,24 +20,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import core, db, jobs, plugins, prompts, review_page, system
+from . import core, db, jobs, plugins, prompts, review_page, rubric, system
 
 WEB = Path(__file__).resolve().parent / 'web'
-FONTS = Path(__file__).resolve().parent / 'fonts'
-KIND_BADGE = {'approve': 'approve', 'changes': 'request changes', 'reject': 'reject (for good)',
-              'skip': 'skip: staff note, post by hand'}
+KIND_BADGE = {'approve': 'Approve', 'changes': 'Request changes', 'reject': 'Reject (for good)', 'move': 'Move review',
+              'skip': 'Skip: staff note, post by hand'}
 TEXT_FIELDS = ['note to player', 'what to change', 'airtable justification', 'specific technical features',
-               'deflation reason', 'danger flag acknowledgement', 'update justification', 'staff note']
+               'deflation reason', 'danger flag acknowledgement', 'update justification', 'staff note', 'move note']
 PRETTY = {'verdict': 'Verdict', 'specific technical features': 'Specific technical features',
           'airtable deflation (hours)': 'Airtable deflation (hours)', 'crop deflation (hours)': 'Crop deflation (hours)',
           'deflation reason': 'Deflation reason', 'multiplier': 'Multiplier', 'airtable justification': 'Airtable justification',
           'note to player': 'Note to player', 'what to change': 'What to change',
           'danger flag acknowledgement': 'Danger flag acknowledgement', 'update justification': 'Update justification',
-          'staff note': 'Staff note'}
+          'staff note': 'Staff note', 'move note': 'Move note'}
 ORDER = ['verdict', 'specific technical features', 'airtable deflation (hours)', 'crop deflation (hours)', 'deflation reason',
          'multiplier', 'airtable justification', 'note to player', 'what to change', 'danger flag acknowledgement',
-         'update justification', 'staff note']
-TEMPLATE_NAMES = {'approve': 'Approve', 'changes': 'Request changes', 'reject': 'Reject'}
+         'update justification', 'staff note', 'move note']
+TEMPLATE_NAMES = {'approve': 'Approve', 'changes': 'Request changes', 'reject': 'Reject', 'move': 'Move review'}
 VIDEO_TYPES = ('.mp4', '.mkv', '.webm', '.mov', '.avi')
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "font-src 'self'; connect-src 'self'; media-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
@@ -181,7 +180,8 @@ class Desk:
     @staticmethod
     def mine_label(s):
         if s.state == 'drafted':
-            return {'approve': 'approve', 'changes': 'changes', 'reject': 'reject', 'skip': 'skip note'}.get(s.verdict_kind, 'drafted')
+            return {'approve': 'approve', 'changes': 'changes', 'reject': 'reject', 'move': 'move',
+                    'skip': 'skip note'}.get(s.verdict_kind, 'drafted')
         if s.state == 'new':
             return 'suggested' if s.suggested else 'page' if s.page_text else 'steps' if s.quick else ''
         return s.state
@@ -196,7 +196,8 @@ class Desk:
                         'page': bool(s.page_text), 'quick': bool(s.quick), 'in_queue': s.item is not None,
                         'queuedAt': item.get('queuedAt') or '', 'seconds': item.get('seconds') or 0,
                         'platforms': item.get('platforms') or [], 'mine': self.mine_label(s),
-                        'check': self.check_level(s), 'waiting': review_page.ago(item.get('queuedAt')) if item else ''})
+                        'check': self.check_level(s), 'waiting': review_page.ago(item.get('queuedAt')) if item else '',
+                        'claimed_by': item.get('claimedBy') if item.get('claimedBy') and not item.get('claimedByMe') else None})
         return out
 
     def status(self):
@@ -317,6 +318,9 @@ class Desk:
         d = {'sid': sid, 'num': s.num, 'title': s.title, 'username': s.username, 'week': s.week, 'state': s.state,
              'skipped': s.skipped, 'notes': s.notes, 'draft': bool(s.draft), 'kind': s.verdict_kind if s.draft else '',
              'claim': claim, 'rev': self.rev.get(sid, 0), 'page_html': self.page_html(s, page),
+             'hours': round((item.get('seconds') or 0) / 3600, 1) if s.item else None,
+             'waiting': review_page.ago(item.get('queuedAt')) if s.item else '', 'platforms': item.get('platforms') or [],
+             'has_page': bool(s.page_text),
              'facts_html': review_page.md(re.sub(r'^# .*\n', '', s.page_text)) if s.page_text else
              '<p class="muted"><i>No imported page for this ship.</i></p>',
              'test': self.test_segments(s, page), 'demo': ((page or {}).get('project') or {}).get('demoUrl'),
@@ -337,7 +341,10 @@ class Desk:
         if kind == 'approve' and self.fraud_cut(page, cut) and not (f.get('deflation reason') or '').strip():
             f['deflation reason'] = self.fraud_reason(page)        # what the review form fills in for fraud's cut
         d['badge'] = KIND_BADGE.get(kind, f.get('verdict', '?'))
-        d['fields'] = [{'key': k, 'text': f[k], 'player': k in core.PLAYER_FIELDS} for k in TEXT_FIELDS if k in f]
+        d['fields'] = [{'key': k, 'label': PRETTY.get(k, k), 'text': f[k], 'player': k in core.PLAYER_FIELDS}
+                       for k in TEXT_FIELDS if k in f]
+        if kind == 'move':
+            d['move_to'] = 'admin' if 'admin' in (f.get('verdict') or '') else 'fraud'
         if kind == 'approve':
             try:
                 d['multiplier'] = float(f.get('multiplier') or 1.1)
@@ -354,6 +361,7 @@ class Desk:
             d['remarks_html'] = review_page.md(s.remarks)
         left = core.template_problems(s.draft)
         d['template_left'] = left[0][:90] if left else ''
+        d['template_left_all'] = [x if len(x) <= 160 else x[:157] + '…' for x in left[:8]]
         return d
 
     def set_notes(self, sid, notes):
@@ -382,7 +390,7 @@ class Desk:
             return
         new = core.draft_fields(core.template(kind, self.cfg['handle'], self.cfg))
         old = s.fields.get('note to player') or s.fields.get('what to change')
-        if old:
+        if old and kind != 'move':
             new['what to change' if kind == 'changes' else 'note to player'] = old
         page = self.store.page(sid)
         dangers = [f for f in (page or {}).get('flags') or [] if f.get('severity') == 'danger' and not f.get('dismissedAt')]
@@ -397,6 +405,8 @@ class Desk:
             raise Fail('no draft to save')
         f = dict(s.fields)
         page = self.store.page(sid)
+        if s.verdict_kind == 'move' and body.get('move_to') in ('fraud', 'admin'):
+            f['verdict'] = f"move to {body['move_to']}"
         if s.verdict_kind == 'approve' and 'multiplier' in body:
             f['multiplier'] = f'{float(body["multiplier"]):g}'
             cut = float(body.get('cut') or 0)
@@ -651,9 +661,11 @@ class Desk:
         self.dumping = True
 
         def done(code):
-            self.dumping = False
-            new = [f for f in core.dump_folders(self.cfg) if f not in before]
-            n = sum(core.import_dump(self.store, f) for f in new)
+            try:
+                new = [f for f in core.dump_folders(self.cfg) if f not in before]
+                n = sum(core.import_dump(self.store, f) for f in new)
+            finally:
+                self.dumping = False          # only once the pages are cached, so nothing reads them half-imported
             self.say(f'dump finished: {out}, {n} review pages cached' if code == 0 else
                      f'dump stopped (exit {code}); {n} review pages cached so far')
             if self.cur_sid:
@@ -790,9 +802,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, html, 'text/html; charset=utf-8')
         if path.startswith('/static/'):
             name = path[len('/static/'):]
-            base = FONTS if name.startswith('fonts/') else WEB
-            f = (base / (name[len('fonts/'):] if base is FONTS else name)).resolve()
-            if f.is_file() and base.resolve() in f.parents:
+            f = (WEB / name).resolve()
+            if f.is_file() and WEB.resolve() in f.parents:
                 ctype = mimetypes.guess_type(f.name)[0] or 'application/octet-stream'
                 if f.suffix == '.js':
                     ctype = 'text/javascript; charset=utf-8'
@@ -868,6 +879,8 @@ def route(desk, method, path, b, q, handler, upload):
             return {**job.info(), 'text': jobs.clean(text)}
         if head == 'stashes':
             return {'stashes': desk.stashes()}
+        if head == 'rubric':
+            return rubric.guide()
         if head == 'settings':
             return desk.settings()
         raise Fail('unknown request')
