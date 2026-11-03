@@ -38,12 +38,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+DATA = Path(os.environ.get('TERRA_DATA_DIR') or HERE)      # the send queue and writes.jsonl (terra-desk: its workspace)
 ROOT = Path(os.environ.get('TERRA_TOOLS_DIR') or Path(__file__).resolve().parent)
 T = runpy.run_path(str(ROOT / 'terra-api.py'), run_name='terra_api')
 Api, connect, ApiError, resolve = T['Api'], T['connect'], T['ApiError'], T['resolve']
 UUID, REVIEW_ID, SITE, REAL_API = T['UUID'], T['REVIEW_ID'], T['SITE'], T['API']
 LOCAL_API = re.compile(r'http://127\.0\.0\.1:\d+')
-LOG = Path(os.environ.get('TERRA_WRITE_LOG') or HERE / 'writes.jsonl')
+LOG = Path(os.environ.get('TERRA_WRITE_LOG') or DATA / 'writes.jsonl')
 
 # the only non-GET requests this can make. Anything else is refused before a socket opens.
 WRITES = {
@@ -193,7 +194,7 @@ def draft_blocks(path):
     """Plain code blocks holding ### field headings, each with the review id and heading above it."""
     out, sid, title, fence, buf, start, context = [], None, None, None, [], 0, []
     one_ship = False
-    lines = path.read_text(errors='ignore').replace('\r', '').split('\n')
+    lines = path.read_text(encoding='utf-8', errors='ignore').replace('\r', '').split('\n')
     for n, line in enumerate(lines, 1):
         m = re.match(r'^\s*(```|~~~)(.*)$', line)
         if fence is None:
@@ -243,7 +244,7 @@ def newest_dump(sid):
     files = sorted((ROOT / 'queue-json').glob(f'*/{sid}.json'))
     if not files:
         return None, None
-    return json.loads(files[-1].read_text())['shipment'], files[-1].parent.name
+    return json.loads(files[-1].read_text(encoding='utf-8'))['shipment'], files[-1].parent.name
 
 
 def hours(s):
@@ -523,7 +524,8 @@ def multipart(fields):
 
 
 def log(entry):
-    with LOG.open('a') as fh:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open('a', encoding='utf-8') as fh:
         fh.write(json.dumps(entry) + '\n')
 
 
@@ -568,7 +570,7 @@ def already_sent(sid, base):
     if not LOG.exists():
         return None
     pat = re.compile(rf'^/review/shipment/{sid}/(approve|changes|reject|send)$')
-    for line in LOG.read_text().splitlines():
+    for line in LOG.read_text(encoding='utf-8').splitlines():
         try:
             e = json.loads(line)
         except ValueError:
@@ -601,11 +603,11 @@ def confirm(word):
 
 # ---- commands ----
 
-def setup(a):
+def setup(a, from_desk=False):
     base = a.api or REAL_API
     if base != REAL_API and not LOCAL_API.fullmatch(base):
         raise SystemExit(f'--api must be {REAL_API} or http://127.0.0.1:<port>')
-    if a.send and not sys.stdin.isatty():
+    if a.send and not sys.stdin.isatty() and not from_desk:
         raise SystemExit('refusing to send: --send needs you at a terminal to approve each ship')
     if a.offline:
         if a.send:
@@ -627,7 +629,7 @@ def fetch(api, sid):
 
 # ---- the send queue (one shared queue; `run` sends it) ----
 
-QUEUE = Path(os.environ.get('TERRA_WRITE_QUEUE') or HERE / 'send-queue')
+QUEUE = Path(os.environ.get('TERRA_WRITE_QUEUE') or DATA / 'send-queue')
 
 
 def queued_file(sid):
@@ -641,7 +643,7 @@ def enqueue(job, priority=False):
     data = {'sid': job['sid'], 'title': job['b']['title'], 'verdict': job['verdict'], 'steps': job['steps'],
             'd': job['d'], 'approvedAt': datetime.now(timezone.utc).isoformat(timespec='seconds')}
     tmp = QUEUE / f'.{stamp}.tmp'
-    tmp.write_text(json.dumps(data))
+    tmp.write_text(json.dumps(data), encoding='utf-8')
     tmp.rename(QUEUE / f'{stamp}-{job["sid"]}.json')  # atomic, so the runner never reads half a file
     n = len(list(QUEUE.glob('*.json')))
     print(f'  queued ({n} in the send queue{"" if runner_alive() else ", no runner going yet"})')
@@ -652,11 +654,34 @@ def queue_files():
     return sorted(QUEUE.glob('*.json'))
 
 
+def pid_alive(pid):
+    """Is that process still running? (On Windows os.kill(pid, 0) would send it Ctrl+C, so ask the kernel instead.)"""
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        h = k32.OpenProcess(0x1000, False, int(pid))
+        if not h:
+            return False
+        try:
+            code = wintypes.DWORD()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def runner_alive():
     f = QUEUE / 'runner.pid'
     try:
-        os.kill(int(f.read_text()), 0)
-        return True
+        return pid_alive(int(f.read_text(encoding='utf-8').strip()))
     except (OSError, ValueError):
         return False
 
@@ -672,7 +697,7 @@ def cmd_queue(a):
         return
     print(f'{len(files)} in the send queue' + (' (runner going)' if runner_alive() else ' (no runner)'))
     for f in files:
-        j = json.loads(f.read_text())
+        j = json.loads(f.read_text(encoding='utf-8'))
         print(f"  {'!' if f.name.startswith('0-') else ' '} {j['approvedAt'][:16]}  {j['verdict']:<8} {j['title']}  {j['sid'][:8]}")
     for name in ('failed', 'sent'):
         n = len(list((QUEUE / name).glob('*.json'))) if (QUEUE / name).exists() else 0
@@ -685,13 +710,13 @@ def cmd_every(a):
     if not runner_alive():
         raise SystemExit('no runner is going')
     v = a.value.strip().lower()
-    if v not in ('pause', 'resume', 'p'):
+    if v not in ('pause', 'resume', 'p', 'stop'):
         try:
             if float(v) <= 0:
                 raise ValueError
         except ValueError:
-            raise SystemExit('give minutes above 0, or pause / resume')
-    (QUEUE / 'every').write_text(v)
+            raise SystemExit('give minutes above 0, or pause / resume / stop')
+    (QUEUE / 'every').write_text(v, encoding='utf-8')
     print(f'sent {v!r} to the runner; it picks it up within a second')
 
 
@@ -702,16 +727,17 @@ def cmd_run(a):
         raise SystemExit('--every needs a number of minutes above 0')
     if a.hold not in (0, 1):
         raise SystemExit('--hold is 0 or 1: Terra only lets you hold one claim at a time')
-    if not sys.stdin.isatty():
-        raise SystemExit('refusing: run it in a terminal you keep open')
-    QUEUE.mkdir(exist_ok=True)
+    if not sys.stdin.isatty() and not a.from_desk:
+        raise SystemExit('refusing: run it in a terminal you keep open (or start it from terra-desk)')
+    interactive = sys.stdin.isatty() and os.name != 'nt'      # select() on stdin only works on Unix terminals
+    QUEUE.mkdir(parents=True, exist_ok=True)
     for name in ('sent', 'failed'):
         (QUEUE / name).mkdir(exist_ok=True)
     if runner_alive():
         raise SystemExit('a runner is already going (send-queue/runner.pid). One at a time.')
-    (QUEUE / 'runner.pid').write_text(str(os.getpid()))
+    (QUEUE / 'runner.pid').write_text(str(os.getpid()), encoding='utf-8')
     a.send, a.offline = True, False
-    base, api, writer = setup(a)
+    base, api, writer = setup(a, from_desk=a.from_desk)
     held = {}            # sid -> time we claimed it
     beat_fails = {}      # sid -> heartbeats in a row that failed
     paused = False
@@ -730,24 +756,24 @@ def cmd_run(a):
         held.pop(sid, None)
 
     def park(f, why):
-        f.rename(QUEUE / 'failed' / f.name)
-        (QUEUE / 'failed' / (f.stem + '.why.txt')).write_text(why + '\n')
+        f.replace(QUEUE / 'failed' / f.name)
+        (QUEUE / 'failed' / (f.stem + '.why.txt')).write_text(why + '\n', encoding='utf-8')
 
     say(f'runner going: one send every {a.every:g} min, '
         + ('claiming the next ship right after each send and holding it through the wait' if a.hold else
            'claiming each ship right when it goes out')
-        + '. Ctrl+C stops it '
-        f'(releases the claims; the queue stays for next time).')
+        + ('. Stop it from terra-desk ' if a.from_desk else '. Ctrl+C stops it ')
+        + '(releases the claims; the queue stays for next time).')
     try:
         while True:
             files = queue_files()
-            sids = {json.loads(f.read_text())['sid']: f for f in files}
+            sids = {json.loads(f.read_text(encoding='utf-8'))['sid']: f for f in files}
             # a ship removed from the queue: give its claim back
             for sid in [x for x in held if x not in sids]:
                 release(sid, ' (removed from the queue)')
             # claim the next ship (with --hold 1): right after a send, the next one is claimed and held through the wait
             for f in files[:a.hold]:
-                j = json.loads(f.read_text())
+                j = json.loads(f.read_text(encoding='utf-8'))
                 if j['sid'] in held:
                     continue
                 try:
@@ -782,18 +808,18 @@ def cmd_run(a):
                 last_beat = time.time()
             # send the oldest one when it's time
             due = not paused and (last_send is None or time.time() - last_send >= a.every * 60)
-            if files and due and (a.hold == 0 or json.loads(files[0].read_text())['sid'] in held):
+            if files and due and (a.hold == 0 or json.loads(files[0].read_text(encoding='utf-8'))['sid'] in held):
                 f = files[0]
-                j = json.loads(f.read_text())
+                j = json.loads(f.read_text(encoding='utf-8'))
                 job = {'sid': j['sid'], 'verdict': j['verdict'], 'steps': j['steps'], 'd': j['d']}
                 if already_sent(j['sid'], base):
-                    f.rename(QUEUE / 'sent' / f.name)
+                    f.replace(QUEUE / 'sent' / f.name)
                     held.pop(j['sid'], None)
                     say(f"{j['title']}: already sent (writes.jsonl), dropped from the queue")
                     continue
                 try:
                     send_job(a, job, api, writer, quiet=True, holding=j['sid'] in held)
-                    f.rename(QUEUE / 'sent' / f.name)
+                    f.replace(QUEUE / 'sent' / f.name)
                     held.pop(j['sid'], None)
                     say(f"SENT {j['verdict']}: {j['title']}")
                 except Refuse as e:
@@ -805,17 +831,25 @@ def cmd_run(a):
                 continue
             left = 0 if last_send is None else max(0, a.every * 60 - (time.time() - last_send))
             state = 'PAUSED' if paused else f'next send in {int(left // 60)}:{int(left % 60):02d}'
-            print(f'\r  {len(files)} queued, {len(held)} claimed, every {a.every:g} min, {state}  '
-                  f'(type minutes or p + Enter)   ', end='', flush=True)
+            if interactive:
+                print(f'\r  {len(files)} queued, {len(held)} claimed, every {a.every:g} min, {state}  '
+                      f'(type minutes or p + Enter)   ', end='', flush=True)
+            elif int(time.time()) % 30 == 0:
+                print(f'  {len(files)} queued, {len(held)} claimed, every {a.every:g} min, {state}', flush=True)
             # live controls: type a number + Enter to change the gap, p + Enter to pause or resume.
             # `terra-write.py every MIN` from another terminal does the same through send-queue/every
             change = None
-            if select.select([sys.stdin], [], [], 1)[0]:
-                change = sys.stdin.readline().strip().lower()
+            if interactive:
+                if select.select([sys.stdin], [], [], 1)[0]:
+                    change = sys.stdin.readline().strip().lower()
+            else:
+                time.sleep(1)
             ctl = QUEUE / 'every'
             if ctl.exists():
-                change = ctl.read_text().strip().lower()
+                change = ctl.read_text(encoding='utf-8').strip().lower()
                 ctl.unlink()
+            if change == 'stop':
+                raise KeyboardInterrupt
             if change in ('p', 'pause', 'resume'):
                 paused = not paused if change == 'p' else change == 'pause'
                 say('paused, nothing will be sent until you resume (p + Enter)' if paused else 'resumed')
@@ -1061,9 +1095,11 @@ def main(argv=None):
                          'wait (Terra allows one claim at a time, so you can\'t review in the browser meanwhile). '
                          '0: claim each ship only right when it is sent, which keeps your claim free while waiting')
     rn.add_argument('--api', help=f'API base, default {REAL_API}; http://127.0.0.1:<port> for a fake server')
+    rn.add_argument('--from-desk', action='store_true',
+                    help='started from terra-desk (no terminal needed; stop it with `every stop` or the Stop button)')
     rn.set_defaults(fn=cmd_run, json=False, video=None, no_video=False)
     ev = sub.add_parser('every', help='change a running runner\'s minutes between sends, or pause / resume it')
-    ev.add_argument('value', help='minutes (e.g. 2 or 0.5), or pause / resume')
+    ev.add_argument('value', help='minutes (e.g. 2 or 0.5), or pause / resume / stop')
     ev.set_defaults(fn=cmd_every)
     q = sub.add_parser('queue', help='show the send queue, or take a ship out of it')
     q.add_argument('--remove', metavar='ID', help='shipment id (or the start of it) to take out')

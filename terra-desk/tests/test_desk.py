@@ -1,6 +1,9 @@
 """Characterization tests: they pin down what terra-desk does now, so cleanup can't change it unnoticed."""
 import json
+import os
 import shutil
+import sys
+import time
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -192,9 +195,14 @@ def test_find_runnables_and_commands(cfg, tmp_path):
     (rel / 'app.jar').write_bytes(b'PK')
     (rel / 'readme.txt').write_text('hi')
     found = [(p.name, how) for p, how in core.find_runnables(rel)]
-    assert found == [('app.jar', 'java'), ('game.exe', 'wine'), ('tool', 'native'), ('game.console.exe', 'wine')]
+    if os.name == 'nt':                                  # Linux binaries can't start on Windows
+        assert found == [('app.jar', 'java'), ('game.exe', 'exe'), ('game.console.exe', 'exe')]
+        t = core.terminal_command({**cfg, 'terminal': 'cmd'}, ['echo', 'a b'])
+        assert t[:2] == ['cmd', '/k'] and 'echo "a b"' in t[-1]
+        return
+    assert found == [('app.jar', 'java'), ('game.exe', 'exe'), ('tool', 'native'), ('game.console.exe', 'exe')]
     assert core.find_runnables(tmp_path / 'missing') == []
-    cmd = core.sandbox_command(cfg, rel, rel / 'game.exe', 'wine')
+    cmd = core.sandbox_command(cfg, rel, rel / 'game.exe', 'exe')
     assert cmd[:2] == ['env', f"TERRA_SANDBOX_ROOT={cfg['sandbox_root']}"] and cmd[-3:] == [str(rel), 'wine', 'game.exe']
     assert '--gui' in cmd and '--audio' in cmd and '--wine' in cmd
     assert core.sandbox_command(cfg, rel, rel / 'app.jar', 'java')[-4:] == [str(rel), 'java', '-jar', 'app.jar']
@@ -250,6 +258,18 @@ def test_run_plan_names():
 def test_binary_problems(tmp_path):
     from terra_desk import checks
     assert checks.binary_problems(tmp_path / 'missing') == []
+    rel = tmp_path / 'rel'
+    rel.mkdir()
+    (rel / 'game.exe').write_bytes(tiny_pe(['KERNEL32.dll', 'SDL2.dll', 'VCRUNTIME140.dll']))
+    (rel / 'tool.exe').write_bytes(tiny_pe(['KERNEL32.dll', 'MSVCP140D.dll']))
+    (rel / 'ok.exe').write_bytes(tiny_pe(['user32.dll', 'libfoo.dll']))
+    (rel / 'libfoo.dll').write_bytes(b'x')
+    res = checks.binary_problems(rel)
+    assert {'level': 'bad', 'text': 'game.exe needs SDL2.dll, not in the download'} in res
+    assert any(x['level'] == 'bad' and 'tool.exe is a Debug build' in x['text'] for x in res)
+    assert {'level': 'ok', 'text': 'ok.exe: every DLL it needs is a system one or included'} in res
+    assert checks.pe_imports(rel / 'game.exe') == ['KERNEL32.dll', 'SDL2.dll', 'VCRUNTIME140.dll']
+    assert checks.pe_imports(rel / 'libfoo.dll') is None
     real = Path.home() / 'projects/terra-reviews/LearnOpenGL-skim-release'
     if real.is_dir():
         res = checks.binary_problems(real)
@@ -264,7 +284,7 @@ def test_review_page_render():
                               {'https://cdn.example/shot.png': '/tmp/shot.png'})
     for bit in ('Space Game', 'changes requested 1x before', 'lasers', 'Fraud recommends cutting 2.00h', 'danger',
                 'suggests x1.14', 'add a release please', 'abcdef1', 'main.py', 'Not in the repo', 'Siege', 'no README',
-                'problems found', 'file:///tmp/shot.png', 'image (loading or unavailable)'):
+                'problems found', 'src="/tmp/shot.png"', 'image (loading or unavailable)'):
         assert bit in html, bit
     assert 'sam@private.example' not in html
     assert 'not checked yet' in review_page.render(page_data())
@@ -359,168 +379,6 @@ def test_clover_plugin():
 
 # ---- the window (headless) ----
 
-def test_window(cfg, monkeypatch, tmp_path):
-    from PySide6.QtWidgets import QApplication, QMessageBox
-    from terra_desk import app as A, core
-    monkeypatch.setattr(core, 'terra_waiting', lambda tools: {SID: queue_item(), SID2: queue_item(SID2, 'Web thing', platforms=('web',))})
-    monkeypatch.setattr(core, 'fetch_page', lambda store, tools, sid: (store.set_page(sid, page_data(sid)), page_data(sid))[1])
-    monkeypatch.setattr(core, 'run_checks', lambda cfg, tools, store, sid: (store.set_checks(sid, {'level': 'ok', 'rules': [], 'run': [], 'ai': []}), {})[1])
-    monkeypatch.setattr(core, 'fetch_images', lambda cfg, urls: {})
-    monkeypatch.setattr(QMessageBox, 'question', staticmethod(lambda *a, **k: QMessageBox.Yes))
-    qa = QApplication.instance() or QApplication([])
-    w = A.Main()
-
-    def pump(n=40):
-        import time
-        for _ in range(n):
-            qa.processEvents()
-            time.sleep(0.02)
-    pump(60)
-    assert w.table.rowCount() == 2
-    assert w.table.item(0, 3).text() == 'Space Game'
-    w.platform.set_picked({'web'})
-    pump(5)
-    assert w.table.rowCount() == 1
-    w.platform.set_picked({'web', 'windows'})
-    pump(5)
-    assert w.table.rowCount() == 2 and w.platform.text() == 'web, windows'
-    w.platform.choices[1][0].trigger()                    # the "runs here" preset
-    assert w.platform.picked == {'web', 'windows', 'linux', 'other'} and w.platform.text() == 'runs here'
-    w.platform.set_picked(set())
-    w.table.setCurrentCell(0, 0)
-    pump(40)
-    assert w.cur.sid == SID and 'Space Game' in w.page.toHtml()
-    assert w.store.checks(SID)[0] == {'level': 'ok', 'rules': [], 'run': [], 'ai': []}
-    w.notes.setPlainText('works great')
-    pump(60)
-    assert w.store.work(SID)['notes'] == 'works great'
-    row = next(r for r in range(w.table.rowCount()) if w.table.item(r, 0).data(A.Qt.UserRole) == SID)
-    assert w.table.item(row, 0).text() == 'notes'
-    w.notes.setPlainText('')
-    pump(60)
-    assert w.cur.state == 'new' and w.table.item(row, 0).text() == ''      # emptied notes drop the tag
-    w.notes.setPlainText('works great')
-    pump(60)
-    w.store.set_test_steps(SID2, '1. open it')
-    w.reload()
-    pump(5)
-    row2 = next(r for r in range(w.table.rowCount()) if w.table.item(r, 0).data(A.Qt.UserRole) == SID2)
-    assert w.table.item(row2, 0).text() == 'steps'
-    w.table.setCurrentCell(row, 0)
-    pump(10)
-    from PySide6.QtWidgets import QPushButton
-    assert not w.cur.draft and any(b.text() == 'Skip' for b in w.draft_area.widget().findChildren(QPushButton))
-    w.switch_verdict('approve')
-    pump(10)
-    assert w.cur.verdict_kind == 'approve' and 'danger flag acknowledgement' in w.cur.fields
-    w.edits['multiplier'].setValue(1.3)
-    w.save_draft_edits()
-    pump(5)
-    assert w.cur.fields['multiplier'] == '1.3'
-    approve_draft = w.cur.draft
-    from PySide6.QtWidgets import QPushButton
-    assert w.edits['cut'].value() == 0                   # the template says 0: that's what's sent
-    w.set_draft('### Verdict\napprove\n\n### Multiplier\n1.3\n\n### Note to player\nnice, i took 2h off')
-    pump(5)
-    assert w.edits['cut'].value() == 2.0                 # left out: fraud's suggested 2h applies, so it shows that
-    assert w.edits['deflation reason'].toPlainText() == 'Fraud review: too fast'   # filled in like the review form
-    from PySide6.QtWidgets import QInputDialog
-    monkeypatch.setattr(QInputDialog, 'getText', staticmethod(lambda *a, **k: pytest.fail('asked for a reason')))
-    w.save_draft_edits()
-    pump(5)
-    assert w.cur.fields['airtable deflation (hours)'] == '2' and w.cur.fields['deflation reason'] == 'Fraud review: too fast'
-    w.set_draft(approve_draft)
-    pump(5)
-    w.store.set_work(SID, remarks='- hours look high')
-    w.refresh_cur()
-    pump(5)
-    from PySide6.QtWidgets import QLabel
-    panel = w.draft_area.widget()
-    assert any(l.text() == 'Noticed while drafting' for l in panel.findChildren(QLabel))
-    next(b for b in panel.findChildren(QPushButton) if b.text() == 'Clear').click()
-    pump(5)
-    assert w.cur.remarks == '' and w.store.work(SID)['remarks'] is None
-    w.stash()
-    pump(5)
-    assert w.cur.notes == '' and w.cur.draft is None and not w.store.has_work()
-    from terra_desk import db
-    w.pop_stash(db.stashes(w.stash_folder())[0]['path'])
-    pump(5)
-    assert w.cur.notes == 'works great' and w.cur.fields['multiplier'] == '1.3'
-    w.skip()
-    pump(5)
-    assert w.table.rowCount() == 1
-    w.view.setCurrentText('skipped')
-    pump(5)
-    assert w.table.rowCount() == 1
-    player = A.COLUMNS.index('player')
-    w.table.horizontalHeader().resizeSection(player, 157)          # like dragging the column's edge
-    w.fill()
-    pump(40)
-    assert w.table.columnWidth(player) == 157 and core.load_state()['column_widths'] == {'player': 157}
-    core.set_config(w.cfg, 'queue_columns', [c for c in A.COLUMNS if c != 'waiting'])
-    assert core.load_config()['queue_columns'] == [c for c in A.COLUMNS if c != 'waiting']
-    w.columns_changed()
-    assert w.table.isColumnHidden(A.COLUMNS.index('waiting')) and not w.table.isColumnHidden(player)
-    w.columns_changed(reset_widths=True)
-    assert w.table.widths == {} and core.load_state()['column_widths'] == {}
-    from PySide6.QtGui import QTextCursor
-    from PySide6.QtTest import QTest
-    w.view.setCurrentText('queue, all')
-    pump(5)
-    w.table.setCurrentCell(next(r for r in range(w.table.rowCount()) if w.table.item(r, 0).data(A.Qt.UserRole) == SID), 0)
-    pump(10)
-    w.notes.moveCursor(QTextCursor.End)
-    QTest.keyClicks(w.notes, ' and more')
-    assert w.notes_timer.isActive()                      # typed, not saved yet
-    w.reload()                                           # a background refresh lands before the autosave
-    pump(2)
-    text = w.notes.toPlainText()
-    assert text.endswith(' and more') and w.store.work(SID)['notes'] == text
-    assert w.notes.textCursor().position() == len(text)  # the cursor didn't jump
-    field = w.edits['note to player']
-    field.setPlainText('not saved yet')
-    w.reload()
-    pump(2)
-    assert w.edits['note to player'] is field and field.toPlainText() == 'not saved yet'
-    w.claimed = SID                                      # something the panel shows changes, so it's rebuilt
-    w.reload()
-    pump(2)
-    assert w.edits['note to player'] is not field and w.edits['note to player'].toPlainText() == 'not saved yet'
-    w.claimed = None
-    fake = tmp_path / 'fake-api.py'
-    fake.write_text("import json, sys\nprint('  cloning...', file=sys.stderr)\n"
-                    "print(json.dumps({'download': {'dir': '/rel'}, 'repo': {'dir': '/repo'}, 'args': sys.argv[1:]}))\n")
-    w.cfg['terra_api'] = fake
-    w.view.setCurrentText('queue, all')
-    pump(5)
-    w.table.setCurrentCell(0, 0)
-    pump(5)
-    sid = w.cur.sid
-    w.setup_ship()
-    for _ in range(150):
-        pump(1)
-        if w.store.work(sid).get('release_dir'):
-            break
-    assert w.store.work(sid)['release_dir'] == '/rel' and w.store.work(sid)['repo_dir'] == '/repo'
-    term = w.terminal.current().session
-    assert 'cloning...' in '\n'.join(term.screen.display) and not list((w.cfg['workspace'] / 'builds').glob('.prep-*'))
-    dumper = tmp_path / 'dumper' / 'terra-api.py'
-    dumper.parent.mkdir()
-    dumper.write_text("import json, pathlib, sys\nhere = pathlib.Path(__file__).parent / 'queue-json' / 'stamp'\n"
-                      "here.mkdir(parents=True)\n"
-                      f"(here / '{SID2}.json').write_text(json.dumps({{'shipment': {{'shipment': {{'title': 'Dumped'}}}}}}))\n"
-                      "pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).write_text('# queue')\nprint('dumping 1 ships')\n")
-    w.cfg['terra_api'] = dumper
-    w.dump_queue()
-    for _ in range(150):
-        pump(1)
-        if not w.dumping:
-            break
-    assert w.store.page(SID2)['shipment']['title'] == 'Dumped'
-    assert list((w.cfg['workspace'] / 'dumps').glob('terra-queue-*.md'))
-
-
 # ---- settings ----
 
 def test_templates_can_be_edited(cfg):
@@ -548,62 +406,13 @@ def test_terra_key(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv('TERRA_TOKEN', raising=False)
     assert core.token_state() == 'none'
     core.save_token('  "abc"  ')
-    assert core.TOKEN_FILE.read_text() == 'abc\n' and (core.TOKEN_FILE.stat().st_mode & 0o777) == 0o600
+    assert core.TOKEN_FILE.read_text() == 'abc\n'
+    assert os.name == 'nt' or (core.TOKEN_FILE.stat().st_mode & 0o777) == 0o600
     assert core.token_state() == 'file'
     monkeypatch.setenv('TERRA_TOKEN', 'x')
     assert core.token_state() == 'env'
     core.remove_token()
     assert not core.TOKEN_FILE.exists()
-
-
-def test_settings_dialog(cfg, tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
-    from terra_desk import core, plugins, settings
-    monkeypatch.setattr(core, 'TOKEN_FILE', tmp_path / 'token')
-    monkeypatch.delenv('TERRA_TOKEN', raising=False)
-    QApplication.instance() or QApplication([])
-    win = QWidget()
-    win.cfg, win.hooks, said, changed = cfg, plugins.Hooks(), [], []
-    win.hooks.prompts['draft'] = {'default': 'write a draft', 'help': 'h'}
-    win.hooks.settings.append({'key': 'draft_model', 'label': 'Model', 'choices': ['opus', 'sonnet'], 'default': 'opus'})
-    win.say, win.key_changed = said.append, lambda: changed.append(1)
-    dlg = settings.Settings(win)
-    key_field = next(f for f in dlg.findChildren(QLineEdit) if f.echoMode() == QLineEdit.Password)
-    key_field.setText('secret')
-    key_field.returnPressed.emit()
-    assert core.TOKEN_FILE.read_text() == 'secret\n' and changed == [1] and key_field.text() == ''
-    from PySide6.QtWidgets import QComboBox, QPushButton
-    model = next(c for c in dlg.findChildren(QComboBox) if c.count() == 2 and c.itemText(1) == 'sonnet')
-    assert model.currentText() == 'opus'
-    model.setCurrentText('sonnet')
-    next(b for b in dlg.findChildren(QPushButton) if b.text() == 'Save' and b.parent() is model.parent()).click()
-    assert core.load_config()['draft_model'] == 'sonnet'
-    approve = next(e for e in dlg.findChildren(settings.Editor) if 'Approve' in e.entries)
-    approve.edit.setPlainText('### Verdict\napprove')
-    approve.save()
-    assert core.template('approve', '@x', cfg) == '### Verdict\napprove'
-
-
-def test_live_markdown_only_changes_the_drawing():
-    from PySide6.QtWidgets import QApplication
-    from terra_desk.mdedit import MarkdownEdit
-    QApplication.instance() or QApplication([])
-    text = 'a **b** and **c** `d`\nsee [e](https://e.example) and ~/x_y_z.txt'
-    ed = MarkdownEdit(text)
-    QApplication.processEvents()
-    changed = []
-    ed.textChanged.connect(lambda: changed.append(1))
-
-    def size_at(col):
-        return next(f.format.fontPointSize() for f in ed.document().firstBlock().layout().formats() if f.start == col)
-    assert size_at(2) == 1 and size_at(12) == 1                 # hidden while the box isn't focused
-    ed.live.follow((4, 4))                                      # cursor inside the first bold word
-    assert size_at(2) != 1 and size_at(12) == 1                 # only its own ** show
-    ed.live.follow((7, 7))                                      # right after its closing **: still touching
-    assert size_at(2) != 1
-    ed.live.follow(None)
-    assert size_at(2) == 1
-    assert ed.toPlainText() == text and changed == []
 
 
 def test_slack_markup():
@@ -623,47 +432,6 @@ def test_queue_sends_slack_markup(cfg):
                      fields={'verdict': 'approve', 'note to player': 'the **boss** was *great*'})
     core.queue_draft(cfg, tools, core.open_store(cfg), ship)
     assert seen == ['### Verdict\napprove\n\n### Note to player\nthe *boss* was _great_']
-
-
-def test_terminal_runs_a_command_in_a_pty(tmp_path):
-    import time
-    from PySide6.QtWidgets import QApplication
-    from terra_desk.terminal import TerminalPanel
-    qa = QApplication.instance() or QApplication([])
-    exits, outside = [], []
-    panel = TerminalPanel(lambda argv, cwd: outside.append(argv), print)
-    s = panel.run(['bash', '-c', 'printf "\\033[31mred\\033[0m\\n"; [ -t 0 ] && echo tty; read x; echo "got $x"; pwd'],
-                  'test', tmp_path, done=exits.append)
-    for _ in range(100):
-        qa.processEvents()
-        if 'tty' in '\n'.join(s.screen.display):
-            break
-        time.sleep(0.02)
-    s.write(b'hi\r')
-    for _ in range(200):
-        qa.processEvents()
-        if exits:
-            break
-        time.sleep(0.02)
-    text = '\n'.join(line.rstrip() for line in s.screen.display)
-    assert exits == [0] and 'got hi' in text and str(tmp_path) in text and '[exited 0]' in text
-    assert s.screen.buffer[0][0].fg == 'red' and not s.running
-    panel.run_outside()
-    assert outside and outside[0][0] == 'bash'
-    panel.close_tab(0)
-    assert panel.tabs.count() == 0 and panel.isHidden()
-
-
-def test_terminal_shrink_keeps_output():
-    from terra_desk.terminal import Screen, pyte
-    s = Screen(20, 10, lambda data: None)
-    stream = pyte.Stream(s)
-    stream.feed('one\r\ntwo\r\nthree\r\n')
-    s.resize(5, 20)                                      # blank lines under the cursor go first
-    assert [line.rstrip() for line in s.display[:3]] == ['one', 'two', 'three'] and s.cursor.y == 3
-    s.resize(2, 20)                                      # then the top lines move into the scrollback
-    assert [line.rstrip() for line in s.display] == ['three', ''] and s.cursor.y == 1
-    assert [''.join(c.data for c in row.values()).rstrip() for row in s.history.top] == ['one', 'two']
 
 
 def test_renamed_column_carries_over(cfg):
@@ -756,21 +524,6 @@ def test_clover_test_steps_with_claude(tmp_path):
     assert steps.startswith('**Plays fine.**') and '```\ncommand ls ~/x\n```' in steps and tab == [1]
 
 
-def test_terminal_tabs_close_when_the_command_works(tmp_path):
-    import time
-    from PySide6.QtWidgets import QApplication
-    from terra_desk.terminal import TerminalPanel
-    qa = QApplication.instance() or QApplication([])
-    panel = TerminalPanel(lambda *a: None, print)
-    panel.run(['bash', '-c', 'exit 3'], 'fails', tmp_path)
-    panel.run(['true'], 'works', tmp_path)
-    end = time.time() + 4
-    while time.time() < end:
-        qa.processEvents()
-        time.sleep(0.02)
-    assert [panel.tabs.tabText(i) for i in range(panel.tabs.count())] == ['fails · exit 3']
-
-
 def test_windows_system_dlls():
     from terra_desk.checks import SYSTEM_DLLS
     assert all(SYSTEM_DLLS.match(n) for n in ('KERNEL32.dll', 'UIAutomationCore.dll', 'd3d12.dll', 'VCRUNTIME140_1.dll'))
@@ -841,31 +594,6 @@ def _run(fn):
         return None, e
 
 
-def test_markdown_box_grows_with_its_text():
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
-    from terra_desk.mdedit import MarkdownEdit
-    qa = QApplication.instance() or QApplication([])
-    panel = QWidget()
-    ed = MarkdownEdit('one line')
-    QVBoxLayout(panel).addWidget(ed)
-    ed.grow(min_lines=2, max_lines=6)
-    panel.setFixedSize(300, 600)                         # the offscreen screen may stretch a bare window
-    panel.show()
-    qa.processEvents()
-    height = ed.maximumHeight                            # the height it fixed itself to
-    short = height()
-    ed.setPlainText('one line\ntwo\nthree\nfour')
-    qa.processEvents()
-    four = height()
-    ed.setPlainText('a ' * 400)                          # wraps far past max_lines: stops growing and scrolls
-    qa.processEvents()
-    assert short < four < height() < four * 2 and ed.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
-    ed.setPlainText('')
-    qa.processEvents()
-    assert height() == short                             # never smaller than min_lines
-
-
 def test_checks_remember_the_ship_repo(cfg, monkeypatch):
     from terra_desk import core
     store = core.open_store(cfg)
@@ -875,3 +603,256 @@ def test_checks_remember_the_ship_repo(cfg, monkeypatch):
     core.run_checks(cfg, None, store, SID)
     assert store.work(SID)['repo_dir'] == '/clone-ship'      # the code as it was shipped
     assert core.ship_repo({'repo': {'dir': '/clone'}, 'ship_commit': {'worktree': None}}) == '/clone'
+
+
+# ---- Windows bits that run everywhere ----
+
+def tiny_pe(dlls):
+    """A minimal PE32+ file whose import table lists dlls (enough for checks.pe_imports; it can't run)."""
+    import struct
+    sect_rva, sect_raw = 0x1000, 0x200
+    names, desc = b'', b''
+    name_offsets = []
+    table = 20 * (len(dlls) + 1)
+    for d in dlls:
+        name_offsets.append(table + len(names))
+        names += d.encode() + b'\0'
+    for off in name_offsets:
+        desc += struct.pack('<IIIII', 1, 0, 0, sect_rva + off, 1)
+    desc += b'\0' * 20
+    body = (desc + names).ljust(0x400, b'\0')
+    pe = 0x80
+    opt_size = 240
+    head = bytearray(sect_raw)
+    head[:2] = b'MZ'
+    struct.pack_into('<I', head, 0x3C, pe)
+    head[pe:pe + 4] = b'PE\0\0'
+    struct.pack_into('<HHIIIHH', head, pe + 4, 0x8664, 1, 0, 0, 0, opt_size, 0x22)
+    opt = pe + 24
+    struct.pack_into('<H', head, opt, 0x20B)
+    struct.pack_into('<II', head, opt + 112 + 8, sect_rva, len(desc))          # import directory
+    sec = opt + opt_size
+    head[sec:sec + 8] = b'.idata\0\0'
+    struct.pack_into('<IIII', head, sec + 8, len(body), sect_rva, len(body), sect_raw)
+    return bytes(head) + body
+
+
+@pytest.mark.skipif(os.name == 'nt' or not Path(sys.executable).exists(), reason='needs a Linux ELF')
+def test_elf_needed():
+    from terra_desk import checks
+    got = checks.elf_needed(os.path.realpath(sys.executable))
+    assert got is not None and isinstance(got[0], list)
+    if shutil.which('objdump'):
+        out = subprocess.run(['objdump', '-p', os.path.realpath(sys.executable)], capture_output=True, text=True).stdout
+        import re
+        assert got[0] == re.findall(r'NEEDED\s+(\S+)', out)
+
+
+def test_system_helpers(tmp_path):
+    from terra_desk import system
+    assert system.pid_alive(os.getpid()) and not system.pid_alive(0) and not system.pid_alive('x')
+    xml = system.wsb_config(tmp_path / 'r&d', 'C:\\work\\game.exe')
+    assert '<Networking>Disable</Networking>' in xml and 'r&amp;d' in xml and '<ReadOnly>false</ReadOnly>' in xml
+    argv = system.tool_argv('tools/terra-api.py', 'queue')
+    assert argv[-2:] == ['tools/terra-api.py', 'queue'] or argv[-1] == 'queue'
+    assert system.shell_argv('echo hi')[-1] == 'echo hi'
+    rel = tmp_path / 'rel'
+    rel.mkdir()
+    (rel / 'game.exe').write_bytes(b'MZ')
+    msg, argv = system.sandbox_launch(rel, rel / 'game.exe', 'exe', tmp_path / 'sb')
+    if system.WINDOWS:
+        assert argv[0].endswith('game.wsb') and 'C:\\work\\game.exe' in Path(argv[0]).read_text()
+    else:
+        assert argv is None
+
+
+def test_jobs_run_and_collect_output(tmp_path):
+    from terra_desk import jobs
+    J = jobs.Jobs()
+    done = []
+    j = J.run([sys.executable, '-c', 'import sys; print("\\x1b[31mred\\x1b[0m"); print("a\\rb"); x = input(); print("got", x); sys.exit(3)'],
+              'test', tmp_path, done=done.append)
+    j.write('hi\n')
+    for _ in range(300):
+        if done:
+            break
+        time.sleep(0.02)
+    text = jobs.clean(j.log)
+    assert done == [3] and 'red' in text and '\x1b' not in text and '\nb\n' in text and 'got hi' in text and '[exited 3]' in text
+    assert J.list()[0]['code'] == 3 and not J.list()[0]['running']
+    out = tmp_path / 'out.json'
+    j2 = J.run([sys.executable, '-c', 'import sys; print("{}"); print("progress", file=sys.stderr)'], 'x', tmp_path, stdout_file=out)
+    for _ in range(300):
+        if not j2.running:
+            break
+        time.sleep(0.02)
+    assert out.read_text().strip() == '{}' and 'progress' in j2.log
+    J.close(j.id)
+    assert len(J.list()) == 1
+    bad = J.run(['no-such-program-here'], 'bad', tmp_path)
+    assert bad.code == 127 and 'could not start' in bad.log
+
+
+def test_runner_pid_check_and_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv('TERRA_DATA_DIR', str(tmp_path))
+    monkeypatch.delenv('TERRA_WRITE_QUEUE', raising=False)
+    monkeypatch.delenv('TERRA_WRITE_LOG', raising=False)
+    import runpy
+    W = runpy.run_path(str(Path(__file__).resolve().parent.parent / 'tools/terra-write.py'), run_name='td')
+    assert W['QUEUE'] == tmp_path / 'send-queue' and W['LOG'] == tmp_path / 'writes.jsonl'
+    assert not W['runner_alive']()
+    (tmp_path / 'send-queue').mkdir()
+    (tmp_path / 'send-queue' / 'runner.pid').write_text(str(os.getpid()))
+    assert W['runner_alive']()
+
+
+# ---- the web app (its API, without a socket) ----
+
+def test_web_app(cfg, monkeypatch, tmp_path):
+    from terra_desk import core, server
+    monkeypatch.setattr(core, 'terra_waiting', lambda tools: {SID: queue_item(), SID2: queue_item(SID2, 'Web thing', platforms=('web',))})
+    monkeypatch.setattr(core, 'fetch_page', lambda store, tools, sid, max_age=600: (store.set_page(sid, page_data(sid)), page_data(sid))[1])
+    monkeypatch.setattr(core, 'run_checks', lambda cfg, tools, store, sid: (store.set_checks(sid, {'level': 'ok', 'rules': [], 'run': [], 'ai': []}), {})[1])
+    monkeypatch.setattr(core, 'fetch_images', lambda cfg, urls: {})
+    desk = server.Desk(cfg)
+    call = server.test_client(desk)
+    desk.store.sync_queue(core.terra_waiting(None))
+    desk.reload()
+    code, ships = call('GET', '/api/ships')
+    assert code == 200 and {r['title'] for r in ships['rows']} == {'Space Game', 'Web thing'}
+    assert ships['columns'] == core.QUEUE_COLUMNS
+
+    def wait(cond):
+        for _ in range(200):
+            if cond():
+                return True
+            time.sleep(0.02)
+        return False
+    code, d = call('GET', f'/api/ship/{SID}')
+    assert code == 200 and d['title'] == 'Space Game' and not d['draft'] and d['claim']['state'] == 'free'
+    assert wait(lambda: desk.store.page(SID) is not None)
+    code, d = call('GET', f'/api/ship/{SID}')
+    assert 'shoot asteroids' in d['page_html'] and '<script' not in d['page_html']
+    call('POST', f'/api/ship/{SID}/notes', {'notes': 'works great'})
+    assert desk.store.work(SID)['notes'] == 'works great' and desk.by_key[SID].state == 'notes'
+    call('POST', f'/api/ship/{SID}/notes', {'notes': ''})
+    assert desk.by_key[SID].state == 'new'                       # emptied notes drop the tag
+    call('POST', f'/api/ship/{SID}/notes', {'notes': 'works great'})
+    code, _ = call('POST', f'/api/ship/{SID}/verdict', {'kind': 'approve'})
+    s = desk.by_key[SID]
+    assert s.verdict_kind == 'approve' and 'danger flag acknowledgement' in s.fields
+    code, d = call('GET', f'/api/ship/{SID}')
+    assert d['badge'] == 'approve' and d['cut'] == 0 and 'voters suggest x1.14' in d['hints'] and d['template_left']
+    assert call('POST', f'/api/ship/{SID}/draft', {'multiplier': 1.3, 'cut': 0, 'fields': {}})[1] == {'saved': True}
+    assert desk.by_key[SID].fields['multiplier'] == '1.3'
+    approve_draft = desk.by_key[SID].draft
+    assert call('POST', f'/api/ship/{SID}/draft', {'multiplier': 1.3, 'cut': 3, 'fields': {}})[1] == {'need_reason': True}
+    call('POST', f'/api/ship/{SID}/draft', {'multiplier': 1.3, 'cut': 3, 'fields': {}, 'reason': 'half the time was a tutorial'})
+    assert desk.by_key[SID].fields['deflation reason'] == 'half the time was a tutorial'
+    desk.set_draft(SID, '### Verdict\napprove\n\n### Multiplier\n1.3\n\n### Note to player\nnice, i took 2h off')
+    code, d = call('GET', f'/api/ship/{SID}')
+    assert d['cut'] == 2.0 and {'key': 'deflation reason', 'text': 'Fraud review: too fast', 'player': False} in d['fields']
+    call('POST', f'/api/ship/{SID}/draft', {'multiplier': 1.3, 'cut': 2, 'fields': {'note to player': 'nice!'}})
+    f = desk.by_key[SID].fields
+    assert f['airtable deflation (hours)'] == '2' and f['deflation reason'] == 'Fraud review: too fast' and f['note to player'] == 'nice!'
+    desk.set_draft(SID, approve_draft)
+    desk.store.set_work(SID, remarks='- hours look high')
+    desk.reload()
+    assert 'hours look high' in call('GET', f'/api/ship/{SID}')[1]['remarks_html']
+    call('POST', f'/api/ship/{SID}/clear-remarks')
+    assert desk.store.work(SID)['remarks'] is None
+    code, r = call('POST', f'/api/ship/{SID}/queue')
+    assert code == 400 and 'template' in r['error']
+    assert call('POST', '/api/stash')[0] == 200 and not desk.store.has_work() and desk.by_key[SID].notes == ''
+    name = call('GET', '/api/stashes')[1]['stashes'][0]['path']
+    call('POST', '/api/stash/pop', {'name': name})
+    assert desk.by_key[SID].notes == 'works great' and desk.by_key[SID].fields['multiplier'] == '1.3'
+    assert call('POST', '/api/stash/pop', {'name': '../../etc/passwd'})[0] == 400
+    call('POST', f'/api/ship/{SID}/skip', {'skipped': True})
+    assert desk.by_key[SID].skipped
+    call('POST', '/api/settings/columns', {'columns': ['mine', 'player']})
+    assert core.load_config()['queue_columns'] == ['mine', 'ship', 'player']
+    call('POST', '/api/settings/widths', {'widths': {'player': 157}})
+    assert core.column_widths() == {'player': 157}
+    call('POST', '/api/settings/general', {'handle': '@me', 'terminal': '', 'window': 'browser'})
+    assert core.load_config()['handle'] == '@me' and core.load_config()['window'] == 'browser'
+    st = call('GET', '/api/settings')[1]
+    assert [t['name'] for t in st['templates']] == ['Approve', 'Request changes', 'Reject']
+    call('POST', '/api/settings/text', {'key': 'template-reject', 'text': '### Verdict\nreject\n\n### Note to player\nno, {handle}'})
+    assert 'no, @me' in core.template('reject', '@me', desk.cfg)
+    assert call('POST', '/api/settings/text', {'key': 'template-reject', 'reset': True})[1]['text'] == core.default_template('reject')
+    assert call('POST', '/api/open-url', {'url': 'https://terra.hackclub.com/admin/review/x'})[0] == 400
+    assert call('POST', '/api/open-url', {'url': 'javascript:alert(1)'})[0] == 400
+
+    # Set up: the tool's JSON on stdout, its progress in the job log
+    fake = tmp_path / 'fake-api.py'
+    fake.write_text("import json, sys\nprint('  cloning...', file=sys.stderr)\n"
+                    "print(json.dumps({'download': {'dir': '/rel'}, 'repo': {'dir': '/repo'}, 'args': sys.argv[1:]}))\n")
+    desk.cfg['terra_api'] = fake
+    r = call('POST', f'/api/ship/{SID2}/setup')[1]
+    assert wait(lambda: desk.store.work(SID2).get('release_dir'))
+    assert desk.store.work(SID2)['release_dir'] == '/rel' and desk.store.work(SID2)['repo_dir'] == '/repo'
+    assert wait(lambda: not desk.jobs.get(r['job']).running)
+    job = call('GET', f"/api/jobs/{r['job']}")[1]
+    assert 'cloning...' in job['text'] and not list((desk.cfg['workspace'] / 'builds').glob('.prep-*'))
+
+    # Dump: review pages land in the data folder and are cached
+    dumper = tmp_path / 'dumper' / 'terra-api.py'
+    dumper.parent.mkdir()
+    dumper.write_text("import json, os, pathlib, sys\nhere = pathlib.Path(os.environ['TERRA_DATA_DIR']) / 'queue-json' / 'stamp'\n"
+                      "here.mkdir(parents=True)\n"
+                      f"(here / '{SID2}.json').write_text(json.dumps({{'shipment': {{'shipment': {{'title': 'Dumped'}}}}}}))\n"
+                      "pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).write_text('# queue')\nprint('dumping 1 ships')\n")
+    desk.cfg['terra_api'] = dumper
+    call('POST', '/api/dump')
+    assert wait(lambda: not desk.dumping)
+    assert desk.store.page(SID2)['shipment']['title'] == 'Dumped'
+    assert list((desk.cfg['workspace'] / 'dumps').glob('terra-queue-*.md'))
+
+    # test-step commands run as jobs
+    r = call('POST', '/api/run-code', {'code': 'echo hello-from-steps'})[1]
+    assert wait(lambda: not desk.jobs.get(r['job']).running)
+    assert 'hello-from-steps' in desk.jobs.get(r['job']).log
+    st = call('GET', '/api/state')[1]
+    assert st['status']['drafted'] >= 1 and any('dump finished' in m['text'] for m in st['messages'])
+
+
+def test_web_server_guards(cfg, monkeypatch):
+    """Over a real socket: the page gets its key, /api needs it, and other Host names are refused."""
+    import urllib.request
+    import urllib.error
+    from terra_desk import core, server
+    monkeypatch.setattr(core, 'terra_waiting', lambda tools: {})
+    desk = server.Desk(cfg)
+    httpd, key = server.make_server(desk, 0)
+    import threading
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f'http://127.0.0.1:{httpd.server_address[1]}'
+    try:
+        with urllib.request.urlopen(base + '/') as r:
+            page = r.read().decode()
+            assert key in page and "script-src 'self'" in r.headers['Content-Security-Policy']
+        for path in ('/static/app.js', '/static/app.css', '/static/fonts/Archivo.ttf', '/static/icon.svg'):
+            with urllib.request.urlopen(base + path) as r:
+                assert r.status == 200
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(base + '/static/../server.py')
+        assert e.value.code == 404
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(base + '/api/ships')
+        assert e.value.code == 403
+        req = urllib.request.Request(base + '/api/ships', headers={'X-Desk-Key': key})
+        with urllib.request.urlopen(req) as r:
+            assert json.loads(r.read())['rows'] == []
+        req = urllib.request.Request(base + '/api/ships', headers={'X-Desk-Key': key, 'Host': 'evil.example'})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req)
+        assert e.value.code == 403
+        req = urllib.request.Request(base + '/api/run-code', data=b'{"code": "echo x"}', method='POST',
+                                     headers={'Content-Type': 'text/plain'})
+        with pytest.raises(urllib.error.HTTPError) as e:              # a cross-site form post has no key
+            urllib.request.urlopen(req)
+        assert e.value.code == 403 and not desk.jobs.list()
+    finally:
+        httpd.shutdown()
+        desk.shutdown()

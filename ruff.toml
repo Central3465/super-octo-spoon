@@ -1,2 +1,1 @@
 line-length = 130
-extend-exclude = ["terra_desk/vendor"]

@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-# Starts terra-desk. Needs Python 3.11+ with PySide6 (Arch: pacman -S pyside6, elsewhere: pip install PySide6).
+# Starts terra-desk from source on Linux or macOS (needs Python 3.11+; nothing else for the app itself).
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-cd "$here" && exec python3 -m terra_desk "$@"
+cd "$here" && exec python3 -X utf8 -m terra_desk "$@"

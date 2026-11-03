@@ -1,10 +1,8 @@
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
-os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -68,8 +66,9 @@ def prep_facts(demo='https://github.com/sam/space/releases/tag/v1', assets=('spa
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
     conf = tmp_path / 'config.toml'
-    conf.write_text(f'workspace = "{tmp_path / "ws"}"\nhandle = "@tester"\nprompts_dir = "{tmp_path / "prompts"}"\n'
-                    f'ship_globs = ["{tmp_path / "pages-*"}"]\n')
+    t = tmp_path.as_posix()          # forward slashes: TOML strings treat backslashes as escapes (Windows paths)
+    conf.write_text(f'workspace = "{t}/ws"\nhandle = "@tester"\nprompts_dir = "{t}/prompts"\n'
+                    f'ship_globs = ["{t}/pages-*"]\n')
     monkeypatch.setenv('TERRA_DESK_CONFIG', str(conf))
     import importlib
     from terra_desk import core

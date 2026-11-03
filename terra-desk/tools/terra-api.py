@@ -17,7 +17,8 @@ repo with git and sends GETs to code hosts, PyPI and npm (see Web), never with t
 Every command takes --json. Admin and fraud endpoints answer 403 if your account can't see them.
 
 The token is your own Terra login. In the browser console on terra.hackclub.com run
-`copy(localStorage.terra_auth_token)`, then save it with `wl-paste > ~/.config/terra/token`.
+`copy(localStorage.terra_auth_token)`, then paste it into terra-desk's Settings > Terra key (or save it to
+~/.config/terra/token on Linux, %APPDATA%\\terra\\token on Windows).
 It's read from TERRA_TOKEN or that file and never printed.
 """
 import argparse
@@ -39,11 +40,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# where dumps (queue-json/, terra-queue-*.md) and ship pages are kept; terra-desk points this at its workspace
+DATA = Path(os.environ.get('TERRA_DATA_DIR') or HERE)
 API = 'https://api.terra.hackclub.com'
 API_HOST = urllib.parse.urlsplit(API).netloc
 SITE = 'https://terra.hackclub.com'
-TOKEN_FILE = Path.home() / '.config/terra/token'
-CACHE = Path.home() / '.cache/terra'
+if os.name == 'nt':
+    TOKEN_FILE = Path(os.environ.get('APPDATA') or Path.home() / 'AppData/Roaming') / 'terra' / 'token'
+    CACHE = Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData/Local') / 'terra' / 'cache'
+else:
+    TOKEN_FILE = Path.home() / '.config/terra/token'
+    CACHE = Path.home() / '.cache/terra'
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 REVIEW_ID = re.compile(r'admin/review/([0-9a-f-]{36})')
 
@@ -170,7 +177,7 @@ class Api:
 
 
 def connect():
-    token = os.environ.get('TERRA_TOKEN') or (TOKEN_FILE.read_text() if TOKEN_FILE.exists() else '')
+    token = os.environ.get('TERRA_TOKEN') or (TOKEN_FILE.read_text(encoding='utf-8') if TOKEN_FILE.exists() else '')
     token = token.strip().strip('"')
     if not token:
         raise SystemExit(f'no token: set TERRA_TOKEN or save it to {TOKEN_FILE} (see --help)')
@@ -181,11 +188,11 @@ def get_weeks(api):
     # the week list barely changes, so keep it for 6 hours instead of spending a request every run
     f = CACHE / 'weeks.json'
     if f.exists() and time.time() - f.stat().st_mtime < 6 * 3600:
-        return json.loads(f.read_text())
+        return json.loads(f.read_text(encoding='utf-8'))
     w = api.get('/review/weeks')
     w = w if isinstance(w, list) else w.get('weeks', [])
     CACHE.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(w))
+    f.write_text(json.dumps(w), encoding='utf-8')
     return w
 
 
@@ -195,13 +202,13 @@ def resolve(ref):
     if m:
         return m.group(0)
     if ref.isdigit():
-        for f in sorted(list(HERE.glob(f'bulk-review*/{int(ref):02d}-*.md')) + list(Path(os.environ.get('TERRA_SHIPS_DIR', HERE / 'ships')).glob(f'{int(ref)}-*.md'))):
-            ids = REVIEW_ID.findall(f.read_text(errors='ignore'))
+        for f in sorted(list(DATA.glob(f'bulk-review*/{int(ref):02d}-*.md')) + list(Path(os.environ.get('TERRA_SHIPS_DIR', DATA / 'ships')).glob(f'{int(ref)}-*.md'))):
+            ids = REVIEW_ID.findall(f.read_text(encoding='utf-8', errors='ignore'))
             if ids:
                 return ids[0]
         # request changes live in one file per folder, under a `## NN Title` heading
-        for f in sorted(HERE.glob('bulk-review*/request-changes.md')):
-            m = re.search(rf'^## {int(ref):02d} [^\n]*\n+\S*admin/review/([0-9a-f-]{{36}})', f.read_text(errors='ignore'), re.M)
+        for f in sorted(DATA.glob('bulk-review*/request-changes.md')):
+            m = re.search(rf'^## {int(ref):02d} [^\n]*\n+\S*admin/review/([0-9a-f-]{{36}})', f.read_text(encoding='utf-8', errors='ignore'), re.M)
             if m:
                 return m.group(1)
         raise SystemExit(f'no ship page numbered {int(ref)} with a review URL in it')
@@ -210,9 +217,9 @@ def resolve(ref):
 
 def known_ids():
     ids = set()
-    for f in list(HERE.glob('bulk-review*/*.md')) + list((HERE / 'queue-skim').rglob('*.md')):
+    for f in list(DATA.glob('bulk-review*/*.md')) + list((DATA / 'queue-skim').rglob('*.md')):
         if 'chunk-' not in f.name:
-            ids.update(REVIEW_ID.findall(f.read_text(errors='ignore')))
+            ids.update(REVIEW_ID.findall(f.read_text(encoding='utf-8', errors='ignore')))
     return ids
 
 
@@ -1675,7 +1682,7 @@ def cmd_weeks(a, api):
     w = api.get('/review/weeks')
     w = w if isinstance(w, list) else w.get('weeks', [])
     CACHE.mkdir(parents=True, exist_ok=True)
-    (CACHE / 'weeks.json').write_text(json.dumps(w))
+    (CACHE / 'weeks.json').write_text(json.dumps(w), encoding='utf-8')
     if a.json:
         return show(w)
     for x in w:
@@ -1785,9 +1792,9 @@ def cmd_dump(a, api):
     print(f'dumping {len(todo)} ships (~{len(todo) * 2.5 * api.gap / 60:.0f} min)', file=sys.stderr)
 
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d-%H-%M')
-    raw = HERE / 'queue-json' / stamp
+    raw = DATA / 'queue-json' / stamp
     raw.mkdir(parents=True, exist_ok=True)
-    dump = Path(a.out) if a.out else HERE / f'terra-queue-{stamp}.md'
+    dump = Path(a.out) if a.out else DATA / f'terra-queue-{stamp}.md'
     parts = []
     for n, item in enumerate(todo, 1):
         sid = item['id']
@@ -1796,10 +1803,10 @@ def cmd_dump(a, api):
         except ApiError as e:
             print(f'  {n}/{len(todo)} skipped, {e}', file=sys.stderr)
             continue
-        (raw / f'{sid}.json').write_text(json.dumps({'shipment': d, 'notes': notes, 'chain': chain}, default=str))
+        (raw / f'{sid}.json').write_text(json.dumps({'shipment': d, 'notes': notes, 'chain': chain}, default=str), encoding='utf-8')
         parts.append(render(d, notes, chain, weeks, waiting - n if not a.refs else None))
         # write as we go so a stop halfway still leaves a usable dump
-        dump.write_text('\n\n---\n\n'.join(parts) + '\n')
+        dump.write_text('\n\n---\n\n'.join(parts) + '\n', encoding='utf-8')
         print(f'  {n}/{len(todo)} {d["shipment"].get("title") or item.get("title")}', file=sys.stderr)
     print(f'wrote {dump} ({len(parts)} ships), raw json in {raw}', file=sys.stderr)
 
@@ -1807,11 +1814,11 @@ def cmd_dump(a, api):
 def cmd_prep(a, api):
     sid = resolve(a.ref)
     if a.offline:
-        dumps = sorted(HERE.glob(f'queue-json/*/{sid}.json'))
+        dumps = sorted(DATA.glob(f'queue-json/*/{sid}.json'))
         if not dumps:
             die(f'no queue-json/*/{sid}.json dump of this ship; run it without --offline')
-        raw = json.loads(dumps[-1].read_text())
-        d, notes, source = raw['shipment'], raw.get('notes'), f'offline: {dumps[-1].relative_to(HERE)}'
+        raw = json.loads(dumps[-1].read_text(encoding='utf-8'))
+        d, notes, source = raw['shipment'], raw.get('notes'), f'offline: {dumps[-1].relative_to(DATA)}'
     else:
         d, notes, _ = fetch_ship(api, sid)
         source = 'live from Terra'
@@ -1866,7 +1873,7 @@ def main(argv=None):
     d.add_argument('-o', '--out', help='output file instead of terra-queue-<stamp>.md')
     p = cmd('prep', cmd_prep, "clone or fetch a ship's repo and print the mechanical review facts (replaces prep.sh)",
             ref=True)
-    p.add_argument('--dir', default=str(HERE), help='where clones, -ship worktrees and -release folders go (default: this folder)')
+    p.add_argument('--dir', default=str(DATA), help='where clones, -ship worktrees and -release folders go (default: the data folder)')
     p.add_argument('--offline', action='store_true', help='read the ship from the newest queue-json/*/<id>.json dump, no Terra request')
     p.add_argument('--download', action='store_true',
                    help='download the assets of the first release after the ship into <repo>-release/ (never run)')
