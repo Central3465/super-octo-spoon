@@ -63,8 +63,9 @@ jobs:
           Expand-Archive build/mingit.zip -DestinationPath build/mingit -Force
       - name: Smoke test the build
         run: |
-          ./dist/terra-desk/terra-desk-cli.exe --tool terra-api.py endpoints | Select-Object -First 3
+          $out = ./dist/terra-desk/terra-desk-cli.exe --tool terra-api.py endpoints
           if ($LASTEXITCODE -ne 0) { throw "the bundled tools don't start" }
+          $out | Select-Object -First 3
           ./build/mingit/cmd/git.exe --version
       - name: Build the installer
         run: |
