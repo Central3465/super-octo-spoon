@@ -192,8 +192,8 @@ class Ship:
     @property
     def verdict_kind(self):
         v = (self.fields.get('verdict') or '').lower()
-        return ('changes' if 'change' in v else 'reject' if 'reject' in v else 'approve' if 'approve' in v
-                else 'skip' if 'skip' in v else v)
+        return ('move' if v.startswith('move') else 'changes' if 'change' in v else 'reject' if 'reject' in v
+                else 'approve' if 'approve' in v else 'skip' if 'skip' in v else v)
 
 
 def page_folders(cfg):
@@ -559,7 +559,7 @@ def compress_video(src, dest, limit=VIDEO_LIMIT):
 
 # ---- templates ----
 
-TEMPLATE_KINDS = ('approve', 'changes', 'reject')
+TEMPLATE_KINDS = ('approve', 'changes', 'reject', 'move')
 
 
 def template(kind, handle, cfg=None):
@@ -569,25 +569,41 @@ def template(kind, handle, cfg=None):
 
 
 def default_template(kind):
+    """The built-in templates, written to follow the review guide. Lines in (parentheses) are reminders: a draft
+    can't be queued until they are replaced."""
     end = 'if you have any questions DM {handle}'
     if kind == 'approve':
         return build_draft({
             'Verdict': 'approve',
-            'Specific technical features': '(what they built, concretely: the systems, tools and tricks)',
+            'Specific technical features': '(what it is and what it\'s made with, then what it actually does, '
+                                           'e.g. multiplayer with rollback, procedural maps, cloud saves. Only what is in the ship)',
             'Airtable deflation (hours)': '0',
             'Crop deflation (hours)': '0',
             'Multiplier': '1.1',
-            'Airtable justification': '(80+ characters: what you tested and on what, commits and hours, AI use and '
-                                      'whether it matches the declaration, beginner or not, whether the time makes sense)',
-            'Note to player': f'(one thing they did well, one thing to improve; if you cut hours, say why)\n{end}',
+            'Airtable justification': '(what you tested, on what, and how it went, including bugs you hit)\n'
+                                      '(N commits match the N devlogs, and why the hours make sense, or what you cut and why)\n'
+                                      '(one short bit for every flag or "suspicious" warning, explaining it)\n'
+                                      '(AI use vs what they declared; beginner or experienced, if it matters for the hours)',
+            'Note to player': '(something specific you liked, quote their own wording if it\'s fun)\n'
+                              '(the 2-3 things that matter most to improve, maybe with the fix)\n'
+                              '(if you cut hours: i took Xh off since <reason in plain words>)\n'
+                              f'keep it up!\n{end}',
         })
     if kind == 'changes':
         return build_draft({'Verdict': 'request changes',
-                            'What to change': f'(one nice thing, then the 1-2 things that block it, each with how to fix it)\n'
-                                              f"reship and we'll take another look!\n{end}"})
+                            'What to change': '(something specific you liked) is really cool (^-^)\n'
+                                              'projects don\'t need to be finished to ship, but what you ship has to work, and right now:\n\n'
+                                              '1. (exact problem. exact fix)\n'
+                                              '2. (exact problem. exact fix)\n\n'
+                                              f"then reship and we'll take another look!\n{end}"})
     if kind == 'reject':
         return build_draft({'Verdict': 'reject',
-                            'Note to player': f'(why it can never count here, e.g. school or paid work, and where it could go instead)\n{end}'})
+                            'Note to player': '(why it can never count here: school or paid work, not your own project, '
+                                              f'or mostly AI and unpolished, and where it could go instead)\n{end}'})
+    if kind == 'move':
+        return build_draft({'Verdict': 'move to fraud',
+                            'Move note': '(why it needs fraud review or an admin: what looks suspicious, '
+                                         'or that it has run out of request-changes rounds)'})
     raise ValueError(kind)
 
 
@@ -645,7 +661,12 @@ def remove_token():
 
 def template_problems(draft):
     """Leftover (placeholder) text from a template."""
-    return [line.strip() for line in draft.split('\n') if re.match(r'^\(.*\)$', line.strip())]
+    out = []
+    for line in draft.split('\n'):
+        t = line.strip()
+        if re.match(r'^\(.*\)$', re.sub(r'^(\d+[.)]|[-*])\s+', '', t)) or re.match(r'^\([^)]*\)\s+is really cool\b', t):
+            out.append(t)
+    return out
 
 
 # ---- queueing ----

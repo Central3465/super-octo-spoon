@@ -11,10 +11,10 @@ from datetime import datetime, timezone
 from . import look as T
 from .core import WEEKS
 
-C = {'bg': T.BG, 'code': '#1d1c24', 'line': T.LINE, 'text': T.INK, 'dim': T.MUTED, 'accent': T.LILAC, 'green': T.GREEN,
-     'yellow': T.BUTTER, 'red': T.PINK, 'blue': T.BLUE}
+C = {'bg': T.BG, 'code': 'var(--code-bg)', 'line': T.LINE, 'text': T.INK, 'dim': T.MUTED, 'accent': T.LILAC,
+     'green': T.GREEN, 'yellow': T.BUTTER, 'red': T.PINK, 'blue': T.BLUE}
 PINK, BLUE, BUTTER, PEACH, LILAC, MINT = T.TINTS
-LABEL = f"font-family:'{T.MONO}'; font-size:8.5pt; font-weight:500; letter-spacing:1px; text-transform:uppercase"
+LABEL = ''        # chips and card titles are styled by web/app.css (.rp-chip, .rp-card)
 
 
 def e(x):
@@ -99,16 +99,13 @@ def md(text):
 
 
 def card(title, body, right='', tint=BLUE):
-    """A box with its title as a solid tab, like the feature cards on Fluxion's page."""
-    return (f'<table width="100%" border="1" cellspacing="0" cellpadding="12" style="border-color:{C["line"]}; '
-            f'border-style:solid; border-collapse:collapse; margin-bottom:14px"><tr><td>'
-            f'<span style="background:{tint}; color:{C["bg"]}; {LABEL}">&nbsp;{e(title)}&nbsp;</span>'
-            + (f'<span style="color:{C["dim"]}"> &nbsp; {right}</span>' if right else '')
-            + f'<br>{body}</td></tr></table>')
+    """A section of the review page with a coloured title."""
+    return (f'<section class="rp-card" style="--tint:{tint}"><h3 class="rp-title">{e(title)}'
+            + (f' <span class="rp-right">{right}</span>' if right else '') + f'</h3>{body}</section>')
 
 
 def chip(text, color):
-    return f'<span style="background:{color}; color:{C["bg"]}; {LABEL}">&nbsp;{e(text)}&nbsp;</span>'
+    return f'<span class="rp-chip" style="--tint:{color}">{e(text)}</span>'
 
 
 def render(d, checks=None, images=None, checking=False):
@@ -116,7 +113,7 @@ def render(d, checks=None, images=None, checking=False):
     s, p, mk = d.get('shipment') or {}, d.get('project') or {}, d.get('maker') or {}
     ev = (d.get('evidence') or {}).get('data') or {}
     week = WEEKS.get(s.get('weekNumber'), f"week {s.get('weekNumber')}")
-    parts = [f'<div class="review-page" style="color:{C["text"]}; font-family:\'{T.SANS}\'">']
+    parts = ['<div class="review-page">']
 
     # header
     stage = s.get('stage') or s.get('status') or ''
@@ -129,7 +126,7 @@ def render(d, checks=None, images=None, checking=False):
         chips.append(chip('update', C['blue']))
     if s.get('fraudPending'):
         chips.append(chip('fraud check pending', C['dim']))
-    parts.append(f'<h1 style="margin:0; font-size:26pt; font-weight:800">{e(s.get("title") or p.get("title"))}</h1>'
+    parts.append(f'<h1 class="rp-h1">{e(s.get("title") or p.get("title"))}</h1>'
                  f'<p style="color:{C["dim"]}">by <b style="color:{C["text"]}">{e(mk.get("username"))}</b>'
                  f'{" (" + e(mk.get("displayName")) + ")" if mk.get("displayName") else ""}'
                  f'{" · GitHub " + e(mk.get("githubLogin")) if mk.get("githubLogin") else ""}'
@@ -146,7 +143,7 @@ def render(d, checks=None, images=None, checking=False):
     body = ''
     shot = images.get(p.get('screenshotUrl') or '')
     if shot:
-        body += f'<p><a href="{e(shot)}"><img src="{e(shot)}" width="560"></a></p>'
+        body += f'<p><a href="{e(shot)}"><img src="{e(shot)}"></a></p>'
     body += (f'<p>{md(p.get("description"))}</p>' if p.get('description') else '')
     body += f'<p><b>Ship notes</b></p>{md(s.get("notes"))}'
     body += (f'<p><b>AI declaration:</b> {e(s.get("aiDeclaration") or "none given")}</p>')
@@ -212,7 +209,7 @@ def render(d, checks=None, images=None, checking=False):
         for img in dl.get('images') or []:
             u = img.get('url')
             if u and images.get(u):
-                body += f'<p><a href="{e(images[u])}"><img src="{e(images[u])}" width="520"></a></p>'
+                body += f'<p><a href="{e(images[u])}"><img src="{e(images[u])}"></a></p>'
             elif u:
                 body += f'<p><a href="{e(u)}">image (loading or unavailable)</a></p>'
         crow = ''

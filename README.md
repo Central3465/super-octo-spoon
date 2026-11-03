@@ -24,26 +24,25 @@ Your work goes in `Documents\terra-desk` (the *workspace*). Settings are in `%AP
 
 On Windows Home there is no Windows Sandbox. terra-desk then asks before running a build directly on your PC. Only say yes for builds you trust, or use a VM.
 
-## What it does
+## How it works
 
-- **The queue:** the left side is Terra's review queue, live (refreshed every 2 minutes, or `Ctrl+R`), oldest first, with week, player, hours, how long each has waited and platforms. Ships you've worked on are marked. It only reads; it never claims anything, and it never opens Terra review pages (opening one claims the ship).
-- **Review page:** the middle shows the same things as the review page: the project, ship notes and AI declaration, hours and flags, votes, earlier decisions, devlogs with their commits, and the files Hackatime saw.
-- **Checks:** each ship gets automatic checks (demo link, release build, README, AI signs). After **Set up** it also reads the downloaded `.exe` files' import tables and tells you about missing DLLs or Debug builds. Nothing is run for this.
-- **Set up:** clones the repo (plus a checkout of the exact ship commit) and downloads the release next to it. Nothing is run.
-- **Run:** starts the release in Windows Sandbox (see above). Demo links open in your browser.
-- **Notes:** type what you saw. They're saved as you type.
-- **Video:** attach a recording of your test. It's compressed to under 20 MiB and uploaded with the approve.
-- **Templates:** approve, request changes and reject skeletons with every required field. The app won't queue a draft that still has template text in `(parentheses)`.
-- **Queue:** checks the draft against the live ship (stage, evidence version, flags, already sent) and puts it in the send queue. Approves go first.
-- **Send:** **Runner ▾ → Start the runner** sends the queue, one ship every N minutes. It claims each ship right before sending it. Pause, change the gap or stop it from the same menu. It keeps running if you close the window; **Stop** releases its claims.
-- **Jobs:** Set up, Run, dumps, the runner and test-step commands show their output in the Jobs panel at the bottom (`Ctrl+``). **Open outside** runs the same command again in its own terminal window.
-- **Stash:** put all your work aside to start fresh, and bring it back later.
+The ship list is on the left. Pick a ship and work through three steps:
 
-Everything you do (notes, drafts, videos, where Set up put things, skipped ships) is kept in one SQLite file, `terra-desk.db` in the workspace. The send queue and the log of everything sent to Terra (`writes.jsonl`) are in the workspace's `send` folder.
+1. **Review page:** the same things Terra's review page shows (the project, ship notes and AI declaration, hours and flags, votes, earlier decisions, devlogs with their commits, the files Hackatime saw), plus automatic **checks** (demo link, release build, README, AI signs, and missing DLLs or Debug builds in a downloaded `.exe`).
+2. **Test it:** **Set up** downloads the code (at the exact ship commit) and the release. Nothing runs until you press **Run**, which starts it in Windows Sandbox (see above). Write your **notes** here; they save as you type.
+3. **Decide:** pick a verdict (**Approve**, **Request changes**, **Reject** or **Move review** to fraud or an admin) and fill in the review. Each field shows what to write from the review guide, with an example. For an approve, the multiplier is a list of the rubric's levels, the hours cut explains when to cut, and you can attach a test video (shrunk to under 20 MB). The draft saves as you type. **Queue for sending** checks it against the live ship and adds it to the send queue. It won't queue while reminders in `(parentheses)` are left from the template.
+
+Also:
+
+- **Review guide** (top bar): the review rubric in a side panel next to your work: which verdict, clear reasons to request changes, when to cut hours, the multiplier levels, AI use, and how to write the technical features, the Airtable justification and the note to the player.
+- **The list:** "Waiting for review" shows Terra's queue, oldest first, refreshed every 2 minutes (or **Refresh queue**). Other choices show your drafts, what's queued and sent, and what you skipped. **More filters** narrows it by week and platform. terra-desk only reads the queue: it never claims a ship unless you press **Claim this ship**, and it never opens Terra review pages (opening one claims the ship).
+- **Sending:** the "waiting to send" button in the top bar (or **More → Send queued reviews**) starts the sender. It sends one review every few minutes, claiming each ship right before it goes out, and keeps going if you close the window. Pause or stop it from the same place; stopping gives back its claims.
+- **Activity:** Set up, Run, sending and test-step commands show their output here. **Open in a terminal** runs the same command in its own window.
+- **More:** check every shown ship, save the whole queue to a file, reload your markdown pages, or **stash** all your work to start fresh and bring it back later.
 
 ## Keys
 
-`J`/`K` move through ships, `Ctrl+S` saves notes and the draft, `Ctrl+Enter` queues the draft, `Ctrl+R` refreshes from Terra, `F5` reloads your markdown pages, `Ctrl+,` opens Settings, `Ctrl+`` shows or hides Jobs.
+`J`/`K` move through ships, `1`/`2`/`3` switch between the steps, `Ctrl+S` saves notes and the draft, `Ctrl+Enter` queues the draft, `Ctrl+R` refreshes from Terra, `F5` reloads your markdown pages, `Ctrl+,` opens Settings, `Ctrl+`` shows or hides Activity.
 
 ## Settings file
 
@@ -125,6 +124,6 @@ iscc /DAppVersion=1.0.0 packaging/terra-desk.iss
 
 The installer bundles [MinGit](https://github.com/git-for-windows/git) (GPL-2.0) for cloning and an ffmpeg build from [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg) (ffmpeg is GPL) for compressing videos; both are separate programs that terra-desk starts.
 
-## Look
+## Changing the review guide or templates
 
-The look is borrowed from [Fluxion](https://cloveian.github.io/fluxion/)'s page. Its fonts, Archivo and IBM Plex Mono, come bundled in `terra_desk/fonts/` under the SIL Open Font License (the license files are next to them).
+The templates each verdict starts from are under **Settings → Templates**. The review guide lives in `terra-desk/terra_desk/rubric.py`; edit it there and restart terra-desk.

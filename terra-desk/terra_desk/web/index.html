@@ -10,82 +10,111 @@
 <script src="/static/app.js" defer></script>
 </head>
 <body>
-<header class="bar">
-  <span class="brand">terra-desk</span>
-  <button data-do="refresh" title="Ctrl+R">Refresh queue</button>
-  <button data-do="reload" title="F5: re-read your markdown pages">Reload</button>
-  <button data-do="check-shown" title="Ctrl+Shift+C">Check shown ships</button>
+<header class="topbar">
+  <div class="brand">terra-desk</div>
+  <div id="status" class="status"></div>
+  <div class="grow"></div>
+  <button id="btn-refresh" title="Get the latest queue from Terra (Ctrl+R)">Refresh queue</button>
+  <button id="btn-guide" title="The review rubric, next to your work">Review guide</button>
+  <button id="btn-activity" title="Output of downloads, runs and sending (Ctrl+`)">Activity <span id="activity-count" class="count"></span></button>
+  <button id="btn-settings" title="Your Terra key, handle and templates (Ctrl+,)">Settings</button>
   <div class="menu-wrap">
-    <button data-menu="stash-menu" title="put all your work aside to start fresh, or bring a stash back">Stash ▾</button>
-    <div class="menu" id="stash-menu"></div>
+    <button id="btn-more" aria-haspopup="true">More ▾</button>
+    <div class="menu" id="more-menu"></div>
   </div>
-  <button data-do="dump" title="write every waiting ship to a markdown file and cache their review pages (read-only, ~12 min)">Dump queue</button>
-  <div class="menu-wrap">
-    <button data-menu="runner-menu" id="runner-btn">Runner ▾</button>
-    <div class="menu" id="runner-menu"></div>
-  </div>
-  <button data-do="jobs" title="Ctrl+`">Jobs <span id="jobs-count"></span></button>
-  <button data-do="settings" title="Ctrl+,">Settings…</button>
-  <span id="status" class="status"></span>
-  <span class="grow"></span>
-  <button data-do="quit" class="quiet" title="stop terra-desk (releases your claim)">Quit</button>
 </header>
+<div id="banner" class="banner" hidden></div>
 
-<main class="layout">
-  <section class="pane left">
-    <div class="row">
+<main class="app" id="app">
+  <aside class="sidebar card" aria-label="Ships">
+    <div class="side-head">
+      <h2>Ships</h2>
+      <span id="count" class="muted"></span>
+    </div>
+    <label class="field">
+      <span class="field-label">Show</span>
       <select id="view">
-        <option>queue, unclaimed</option><option>queue, all</option><option>mine, open</option>
-        <option>mine, drafted</option><option>mine, request changes</option><option>queued and sent</option><option>skipped</option>
+        <option value="queue, unclaimed">Waiting for review</option>
+        <option value="queue, all">Everything in the queue</option>
+        <option value="mine, open">My work in progress</option>
+        <option value="mine, drafted">My drafts</option>
+        <option value="mine, request changes">My request changes</option>
+        <option value="queued and sent">Queued and sent</option>
+        <option value="skipped">Skipped</option>
       </select>
-      <select id="week">
-        <option>all weeks</option><option>Prep Week 3</option><option>Week 1</option><option>Week 2</option><option>Week 3</option><option>Week 4</option>
-      </select>
-    </div>
-    <div class="row">
-      <div class="menu-wrap grow">
-        <button data-menu="platform-menu" id="platform-btn" class="pick">all platforms</button>
-        <div class="menu" id="platform-menu"></div>
+    </label>
+    <input id="search" type="search" placeholder="Search by name, player or number" autocomplete="off">
+    <details class="filters" id="filters">
+      <summary>More filters</summary>
+      <div class="filters-body">
+        <label class="field"><span class="field-label">Week</span>
+          <select id="week">
+            <option>all weeks</option><option>Prep Week 3</option><option>Week 1</option><option>Week 2</option><option>Week 3</option><option>Week 4</option>
+          </select>
+        </label>
+        <div class="field"><span class="field-label">Runs on</span><div id="platforms" class="checks"></div></div>
+        <label class="field"><span class="field-label">Order</span>
+          <select id="sort">
+            <option>oldest first</option><option>newest first</option><option>most hours</option><option>fewest hours</option>
+            <option>by platform</option><option>by week</option>
+          </select>
+        </label>
       </div>
-      <select id="sort">
-        <option>oldest first</option><option>newest first</option><option>most hours</option><option>fewest hours</option>
-        <option>by platform</option><option>by week</option>
-      </select>
+    </details>
+    <ul id="ship-list" class="ship-list"></ul>
+  </aside>
+
+  <section class="workspace" id="workspace">
+    <div id="empty" class="card empty">
+      <h2>Pick a ship on the left to start</h2>
+      <p class="muted">Each review goes in three steps: read the <b>review page</b>, <b>test it</b> and write notes, then <b>decide</b>.
+        Open the <b>Review guide</b> at the top any time to see the rubric.</p>
     </div>
-    <input id="search" type="search" placeholder="search title, player or number" autocomplete="off">
-    <div id="count" class="muted small"></div>
-    <div class="table-wrap"><table id="queue"><thead></thead><tbody></tbody></table></div>
+    <div id="ship" hidden>
+      <div class="card ship-head" id="ship-head"></div>
+      <nav class="steps" id="steps" aria-label="Review steps">
+        <button data-step="0"><span class="num">1</span>Review page</button>
+        <button data-step="1"><span class="num">2</span>Test it</button>
+        <button data-step="2"><span class="num">3</span>Decide</button>
+        <button data-step="3" id="step-btn-3" hidden>Imported page</button>
+      </nav>
+      <div class="step" id="step-0"></div>
+      <div class="step" id="step-1" hidden></div>
+      <div class="step" id="step-2" hidden></div>
+      <div class="step" id="step-3" hidden></div>
+    </div>
   </section>
 
-  <section class="pane middle">
-    <nav class="tabs" id="tabs">
-      <button data-tab="0" class="on">Review page</button><button data-tab="1">Test</button><button data-tab="2">Page</button>
-    </nav>
-    <div class="tab-body content" id="tab-0"></div>
-    <div class="tab-body content" id="tab-1" hidden></div>
-    <div class="tab-body content" id="tab-2" hidden></div>
-    <div id="jobs" class="jobs" hidden>
-      <div class="jobs-head"><nav class="tabs small" id="job-tabs"></nav><span class="grow"></span>
-        <button id="job-outside" title="run the same command in its own terminal window">Open outside</button>
-        <button id="job-stop">Stop</button><button id="job-close">Close</button><button id="jobs-hide">Hide</button></div>
-      <pre id="job-log" class="log"></pre>
-      <form id="job-input-form" class="row"><input id="job-input" placeholder="type input for the program, Enter sends" autocomplete="off"></form>
-    </div>
-  </section>
-
-  <section class="pane right">
-    <h2 class="label pink">Your notes</h2>
-    <textarea id="notes" class="mono" placeholder="your test notes (saved as you type)"></textarea>
-    <h2 class="label lilac">Decision</h2>
-    <div id="decision" class="content"></div>
-  </section>
+  <aside class="guide card" id="guide" hidden aria-label="Review guide"></aside>
 </main>
-<footer id="say" class="say"></footer>
 
-<dialog id="settings" class="dialog">
-  <div class="dialog-head"><h2>Settings</h2><span class="grow"></span><button id="settings-close" type="button">Close</button></div>
-  <nav class="tabs" id="settings-tabs"></nav>
-  <div id="settings-body" class="dialog-body"></div>
+<section id="activity" class="drawer" hidden aria-label="Activity">
+  <div class="drawer-head">
+    <h2>Activity</h2>
+    <span class="muted">Downloads, runs, dumps and sending show their output here.</span>
+    <span class="grow"></span>
+    <button id="activity-close">Close</button>
+  </div>
+  <div class="drawer-body">
+    <ul id="job-list" class="job-list"></ul>
+    <div class="job-view">
+      <div class="row" id="job-actions">
+        <b id="job-title" class="grow"></b>
+        <button id="job-outside" title="Run the same command again in its own terminal window">Open in a terminal</button>
+        <button id="job-stop">Stop</button>
+        <button id="job-close">Remove</button>
+      </div>
+      <pre id="job-log" class="log">Nothing has run yet.</pre>
+      <form id="job-input-form" class="row"><input id="job-input" placeholder="Type input for the program and press Enter" autocomplete="off"></form>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<dialog id="dialog" class="dialog">
+  <div class="dialog-head"><h2 id="dialog-title"></h2><span class="grow"></span><button id="dialog-close" type="button">Close</button></div>
+  <div id="dialog-body" class="dialog-body"></div>
 </dialog>
 <dialog id="ask" class="dialog small">
   <p id="ask-text"></p>
