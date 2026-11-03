@@ -114,7 +114,7 @@ def test_store_queue_page_work(tmp_path):
     assert (w['notes'], w['draft']) == ('hello', '### Verdict\napprove')
     st.import_page(SID2, Path('/q.md'), 2.0, 'head2', '', None, 13, 'T2', 9, 'n2', '### Verdict\nreject')
     assert st.work(SID2)['notes'] == 'n2' and st.work(SID2)['draft'] == '### Verdict\nreject'
-    assert st.source_mtimes() == {'/p.md': 1.0, '/q.md': 2.0}
+    assert st.source_mtimes() == {str(Path('/p.md')): 1.0, str(Path('/q.md')): 2.0}
 
 
 def test_store_stash_and_checks(tmp_path):
@@ -129,7 +129,7 @@ def test_store_stash_and_checks(tmp_path):
     assert not st.has_work() and st.work(SID)['notes'] == '' and st.rows()[0]['title'] == 'Space Game'
     row = st.rows()[0]
     assert (row['page_text'], row['test_steps'], row['suggested'], row['num']) == (None, None, None, None)
-    assert st.source_mtimes() == {'/p.md': 1.0}                 # unchanged files aren't imported again
+    assert st.source_mtimes() == {str(Path('/p.md')): 1.0}                 # unchanged files aren't imported again
     assert [(x['drafts'], x['notes'], x['skipped'], x['pages']) for x in stashes(folder)] == [(1, 2, 1, 1)]
     st.set_work(SID, notes='fresh')
     st.pop(first, folder)
