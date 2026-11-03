@@ -4,6 +4,7 @@ The facts come from `terra-api.py prep` (a read-only clone plus GitHub, demo and
 review-page data. Nothing from the player's repo is run. After Set up downloads a release, `binary_problems`
 looks at the files statically (objdump, no running).
 """
+import os
 import re
 import shutil
 from html import unescape
@@ -221,12 +222,103 @@ def _size(n):
     return f'{n / 1048576:.1f} MB' if n >= 1048576 else f'{n / 1024:.0f} KB'
 
 
+def pe_imports(path):
+    """The DLL names a Windows .exe/.dll imports, read from its import table (pure Python, nothing is run).
+    None if it isn't a readable PE file."""
+    import struct
+    try:
+        data = Path(path).read_bytes()
+        if data[:2] != b'MZ':
+            return None
+        pe = struct.unpack_from('<I', data, 0x3C)[0]
+        if data[pe:pe + 4] != b'PE\0\0':
+            return None
+        nsect, opt_size = struct.unpack_from('<H', data, pe + 6)[0], struct.unpack_from('<H', data, pe + 20)[0]
+        opt = pe + 24
+        magic = struct.unpack_from('<H', data, opt)[0]
+        dirs = opt + (96 if magic == 0x10B else 112)
+        imp_rva = struct.unpack_from('<I', data, dirs + 8)[0]          # data directory 1: imports
+        sections = []
+        for k in range(nsect):
+            off = opt + opt_size + 40 * k
+            vsize, va, rawsize, raw = struct.unpack_from('<IIII', data, off + 8)
+            sections.append((va, max(vsize, rawsize), raw))
+
+        def at(rva):
+            for va, size, raw in sections:
+                if va <= rva < va + size:
+                    return rva - va + raw
+            raise ValueError(rva)
+        names, off = [], at(imp_rva) if imp_rva else None
+        while off is not None and off + 20 <= len(data) and len(names) < 512:
+            oft, _, _, name_rva, ft = struct.unpack_from('<IIIII', data, off)
+            if not (oft or name_rva or ft):
+                break
+            n = at(name_rva)
+            names.append(data[n:data.index(b'\0', n)].decode('latin1'))
+            off += 20
+        return names
+    except (OSError, struct.error, ValueError):
+        return None
+
+
+def elf_needed(path):
+    """The shared libraries a Linux ELF binary needs (DT_NEEDED) and its loader, read without running it.
+    (needed, interpreter) or None if it isn't a readable ELF file."""
+    import struct
+    try:
+        data = Path(path).read_bytes()
+        if data[:4] != b'\x7fELF':
+            return None
+        is64, end = data[4] == 2, '<' if data[5] == 1 else '>'
+        if is64:
+            phoff, = struct.unpack_from(end + 'Q', data, 0x20)
+            phentsize, phnum = struct.unpack_from(end + 'HH', data, 0x36)
+        else:
+            phoff, = struct.unpack_from(end + 'I', data, 0x1C)
+            phentsize, phnum = struct.unpack_from(end + 'HH', data, 0x2A)
+        loads, dynamic, interp = [], None, ''
+        for k in range(phnum):
+            o = phoff + k * phentsize
+            if is64:
+                ptype, _, off, vaddr, _, filesz = struct.unpack_from(end + 'IIQQQQ', data, o)
+            else:
+                ptype, off, vaddr, _, filesz = struct.unpack_from(end + 'IIIII', data, o)
+            if ptype == 1:
+                loads.append((vaddr, filesz, off))
+            elif ptype == 2:
+                dynamic = (off, filesz)
+            elif ptype == 3:
+                interp = data[off:off + filesz].rstrip(b'\0').decode('latin1')
+        if not dynamic:
+            return [], interp
+        entries, size = [], 16 if is64 else 8
+        for o in range(dynamic[0], dynamic[0] + dynamic[1], size):
+            tag, val = struct.unpack_from(end + ('qQ' if is64 else 'iI'), data, o)
+            if tag == 0:
+                break
+            entries.append((tag, val))
+        strtab = next((v for t, v in entries if t == 5), None)
+        base = next((vaddr - vaddr + off + (strtab - vaddr) for vaddr, sz, off in loads
+                     if strtab is not None and vaddr <= strtab < vaddr + sz), None)
+        if base is None:
+            return [], interp
+        out = []
+        for t, v in entries:
+            if t == 1:
+                n = base + v
+                out.append(data[n:data.index(b'\0', n)].decode('latin1'))
+        return out, interp
+    except (OSError, struct.error, ValueError):
+        return None
+
+
 def binary_problems(folder):
     """After a download: Windows exes that need DLLs which aren't next to them, Linux binaries missing libraries.
-    Only reads the files (objdump), never runs them."""
+    Only reads the files (their import tables), never runs them."""
     out = []
     folder = Path(folder)
-    if not folder.is_dir() or not shutil.which('objdump'):
+    if not folder.is_dir():
         return out
     present = {p.name.lower() for p in folder.rglob('*.dll')}
     sys_libs = None
@@ -234,12 +326,14 @@ def binary_problems(folder):
         if not p.is_file() or '.sandbox-home' in p.parts or p.stat().st_size < 1024:
             continue
         try:
-            head = p.open('rb').read(4)
+            with p.open('rb') as fh:
+                head = fh.read(4)
         except OSError:
             continue
         if p.suffix.lower() == '.exe' and head[:2] == b'MZ':
-            r = subprocess.run(['objdump', '-p', str(p)], capture_output=True, text=True)
-            dlls = re.findall(r'DLL Name:\s*(\S+)', r.stdout)
+            dlls = pe_imports(p)
+            if dlls is None:
+                continue
             debug = [d for d in dlls if DEBUG_DLLS.match(d)]
             missing = [d for d in dlls if not SYSTEM_DLLS.match(d) and not DEBUG_DLLS.match(d) and d.lower() not in present]
             if debug:
@@ -249,18 +343,23 @@ def binary_problems(folder):
             elif not debug:
                 out.append(item('ok', f'{p.name}: every DLL it needs is a system one or included'))
         elif head == b'\x7fELF':
-            r = subprocess.run(['objdump', '-p', str(p)], capture_output=True, text=True)
-            needed = re.findall(r'NEEDED\s+(\S+)', r.stdout)
+            got = elf_needed(p)
+            if not got:
+                continue
+            needed, interp = got
+            if '/nix/store/' in interp:
+                out.append(item('bad', f'{p.name} is built for NixOS (its loader is in /nix/store), it won\'t start on other Linux'))
             if not needed:
                 continue
+            if os.name == 'nt':
+                continue                    # Linux libraries can't be checked from Windows
             if sys_libs is None:
-                lc = subprocess.run(['ldconfig', '-p'], capture_output=True, text=True).stdout
-                sys_libs = set(re.findall(r'^\s*(\S+)\s', lc, re.M))
+                sys_libs = set()
+                if shutil.which('ldconfig') or Path('/sbin/ldconfig').exists():
+                    lc = subprocess.run([shutil.which('ldconfig') or '/sbin/ldconfig', '-p'], capture_output=True, text=True).stdout
+                    sys_libs = set(re.findall(r'^\s*(\S+)\s', lc, re.M))
             local = {q.name for q in p.parent.glob('*.so*')}
             missing = [n for n in needed if n not in sys_libs and n not in local]
-            interp = re.search(r'/nix/store/', p.read_bytes()[:4096].decode('latin1'))
-            if interp:
-                out.append(item('bad', f'{p.name} is built for NixOS (its loader is in /nix/store), it won\'t start on other Linux'))
-            if missing:
+            if missing and sys_libs:
                 out.append(item('warn', f'{p.name} needs {", ".join(missing)}, not installed here and not in the download'))
     return out

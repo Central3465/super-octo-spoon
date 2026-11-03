@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="desk-key" content="{{KEY}}">
+<title>terra-desk</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <span class="brand">terra-desk</span>
+  <button data-do="refresh" title="Ctrl+R">Refresh queue</button>
+  <button data-do="reload" title="F5: re-read your markdown pages">Reload</button>
+  <button data-do="check-shown" title="Ctrl+Shift+C">Check shown ships</button>
+  <div class="menu-wrap">
+    <button data-menu="stash-menu" title="put all your work aside to start fresh, or bring a stash back">Stash ▾</button>
+    <div class="menu" id="stash-menu"></div>
+  </div>
+  <button data-do="dump" title="write every waiting ship to a markdown file and cache their review pages (read-only, ~12 min)">Dump queue</button>
+  <div class="menu-wrap">
+    <button data-menu="runner-menu" id="runner-btn">Runner ▾</button>
+    <div class="menu" id="runner-menu"></div>
+  </div>
+  <button data-do="jobs" title="Ctrl+`">Jobs <span id="jobs-count"></span></button>
+  <button data-do="settings" title="Ctrl+,">Settings…</button>
+  <span id="status" class="status"></span>
+  <span class="grow"></span>
+  <button data-do="quit" class="quiet" title="stop terra-desk (releases your claim)">Quit</button>
+</header>
+
+<main class="layout">
+  <section class="pane left">
+    <div class="row">
+      <select id="view">
+        <option>queue, unclaimed</option><option>queue, all</option><option>mine, open</option>
+        <option>mine, drafted</option><option>mine, request changes</option><option>queued and sent</option><option>skipped</option>
+      </select>
+      <select id="week">
+        <option>all weeks</option><option>Prep Week 3</option><option>Week 1</option><option>Week 2</option><option>Week 3</option><option>Week 4</option>
+      </select>
+    </div>
+    <div class="row">
+      <div class="menu-wrap grow">
+        <button data-menu="platform-menu" id="platform-btn" class="pick">all platforms</button>
+        <div class="menu" id="platform-menu"></div>
+      </div>
+      <select id="sort">
+        <option>oldest first</option><option>newest first</option><option>most hours</option><option>fewest hours</option>
+        <option>by platform</option><option>by week</option>
+      </select>
+    </div>
+    <input id="search" type="search" placeholder="search title, player or number" autocomplete="off">
+    <div id="count" class="muted small"></div>
+    <div class="table-wrap"><table id="queue"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="pane middle">
+    <nav class="tabs" id="tabs">
+      <button data-tab="0" class="on">Review page</button><button data-tab="1">Test</button><button data-tab="2">Page</button>
+    </nav>
+    <div class="tab-body content" id="tab-0"></div>
+    <div class="tab-body content" id="tab-1" hidden></div>
+    <div class="tab-body content" id="tab-2" hidden></div>
+    <div id="jobs" class="jobs" hidden>
+      <div class="jobs-head"><nav class="tabs small" id="job-tabs"></nav><span class="grow"></span>
+        <button id="job-outside" title="run the same command in its own terminal window">Open outside</button>
+        <button id="job-stop">Stop</button><button id="job-close">Close</button><button id="jobs-hide">Hide</button></div>
+      <pre id="job-log" class="log"></pre>
+      <form id="job-input-form" class="row"><input id="job-input" placeholder="type input for the program, Enter sends" autocomplete="off"></form>
+    </div>
+  </section>
+
+  <section class="pane right">
+    <h2 class="label pink">Your notes</h2>
+    <textarea id="notes" class="mono" placeholder="your test notes (saved as you type)"></textarea>
+    <h2 class="label lilac">Decision</h2>
+    <div id="decision" class="content"></div>
+  </section>
+</main>
+<footer id="say" class="say"></footer>
+
+<dialog id="settings" class="dialog">
+  <div class="dialog-head"><h2>Settings</h2><span class="grow"></span><button id="settings-close" type="button">Close</button></div>
+  <nav class="tabs" id="settings-tabs"></nav>
+  <div id="settings-body" class="dialog-body"></div>
+</dialog>
+<dialog id="ask" class="dialog small">
+  <p id="ask-text"></p>
+  <input id="ask-input" hidden>
+  <div class="row end"><button id="ask-no">Cancel</button><button id="ask-yes" class="primary">OK</button></div>
+</dialog>
+<input type="file" id="video-file" accept="video/mp4,video/x-matroska,video/webm,video/quicktime,video/x-msvideo,.mkv,.avi" hidden>
+</body>
+</html>

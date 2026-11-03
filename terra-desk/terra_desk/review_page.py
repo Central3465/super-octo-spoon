@@ -1,12 +1,14 @@
 """Render a shipment's API data (GET /review/shipment/<id>) as an HTML page laid out like Terra's review page.
 
-Read-only: this only formats data that was already fetched. Commit author emails are never shown.
+Read-only: this only formats data that was already fetched. Commit author emails are never shown. Everything from
+the API is escaped; the web page also blocks scripts in it (Content-Security-Policy) and opens links itself.
+images maps an image's URL to where terra-desk serves the downloaded copy.
 """
 import html
 import re
 from datetime import datetime, timezone
 
-from . import theme as T
+from . import look as T
 from .core import WEEKS
 
 C = {'bg': T.BG, 'code': '#1d1c24', 'line': T.LINE, 'text': T.INK, 'dim': T.MUTED, 'accent': T.LILAC, 'green': T.GREEN,
@@ -114,7 +116,7 @@ def render(d, checks=None, images=None, checking=False):
     s, p, mk = d.get('shipment') or {}, d.get('project') or {}, d.get('maker') or {}
     ev = (d.get('evidence') or {}).get('data') or {}
     week = WEEKS.get(s.get('weekNumber'), f"week {s.get('weekNumber')}")
-    parts = [f'<html><body style="background:{C["bg"]}; color:{C["text"]}; font-family:\'{T.SANS}\'">']
+    parts = [f'<div class="review-page" style="color:{C["text"]}; font-family:\'{T.SANS}\'">']
 
     # header
     stage = s.get('stage') or s.get('status') or ''
@@ -144,7 +146,7 @@ def render(d, checks=None, images=None, checking=False):
     body = ''
     shot = images.get(p.get('screenshotUrl') or '')
     if shot:
-        body += f'<p><a href="file://{e(shot)}"><img src="file://{e(shot)}" width="560"></a></p>'
+        body += f'<p><a href="{e(shot)}"><img src="{e(shot)}" width="560"></a></p>'
     body += (f'<p>{md(p.get("description"))}</p>' if p.get('description') else '')
     body += f'<p><b>Ship notes</b></p>{md(s.get("notes"))}'
     body += (f'<p><b>AI declaration:</b> {e(s.get("aiDeclaration") or "none given")}</p>')
@@ -210,7 +212,7 @@ def render(d, checks=None, images=None, checking=False):
         for img in dl.get('images') or []:
             u = img.get('url')
             if u and images.get(u):
-                body += f'<p><a href="file://{e(images[u])}"><img src="file://{e(images[u])}" width="520"></a></p>'
+                body += f'<p><a href="{e(images[u])}"><img src="{e(images[u])}" width="520"></a></p>'
             elif u:
                 body += f'<p><a href="{e(u)}">image (loading or unavailable)</a></p>'
         crow = ''
@@ -235,7 +237,7 @@ def render(d, checks=None, images=None, checking=False):
         body = ''.join(f'<tr><td>{e(f["path"])}</td><td style="color:{C["dim"]}">{hrs(f["seconds"])}</td></tr>' for f in inrepo[:20])
         html_ = f'<table cellpadding="2">{body}</table>'
         if out:
-            html_ += f'<p><b>Not in the repo</b></p><table cellpadding="2">' + ''.join(
+            html_ += '<p><b>Not in the repo</b></p><table cellpadding="2">' + ''.join(
                 f'<tr><td>{e(f["path"])}</td><td style="color:{C["dim"]}">{e(f.get("status"))} · {hrs(f["seconds"])}</td></tr>' for f in out[:12]) + '</table>'
         parts.append(card('Files', html_, f'{hrs(sum(f.get("seconds") or 0 for f in inrepo))} in the repo'))
 
@@ -245,7 +247,7 @@ def render(d, checks=None, images=None, checking=False):
         body = ''.join(f'<p>{e(x.get("program"))}: {e(x.get("hours"))}h · <a href="{e(x.get("codeUrl"))}">{e(x.get("codeUrl"))}</a>'
                        f' <span style="color:{C["dim"]}">{when(x.get("approvedAt"))}</span></p>' for x in up)
         parts.append(card('Same project in other programs', body, tint=LILAC))
-    parts.append('</body></html>')
+    parts.append('</div>')
     return ''.join(parts)
 
 

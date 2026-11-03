@@ -1,0 +1,87 @@
+# Tests terra-desk on Windows and Linux, and builds the one-click Windows installer (terra-desk-setup.exe).
+# Every run uploads the installer as an artifact; pushing a tag like v1.2.0 also publishes it as a GitHub release.
+name: terra-desk
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MINGIT_VERSION: '2.47.1'
+  MINGIT_TAG: 'v2.47.1.windows.1'
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: terra-desk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest ruff==0.8.4 imageio-ffmpeg
+      - run: python -m ruff check . --select F
+      - run: python -X utf8 -m pytest -q
+
+  installer:
+    needs: test
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: terra-desk
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Version
+        id: v
+        run: |
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { "0.0.$env:GITHUB_RUN_NUMBER" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - name: Build terra-desk.exe
+        run: |
+          python -m pip install pyinstaller==6.11.1 imageio-ffmpeg==0.5.1
+          pyinstaller packaging/terra-desk.spec --noconfirm --distpath dist --workpath build/pyinstaller
+      - name: Get MinGit (Git for the clones, bundled so nothing else needs installing)
+        run: |
+          $url = "https://github.com/git-for-windows/git/releases/download/$env:MINGIT_TAG/MinGit-$env:MINGIT_VERSION-64-bit.zip"
+          Invoke-WebRequest $url -OutFile build/mingit.zip
+          Expand-Archive build/mingit.zip -DestinationPath build/mingit -Force
+      - name: Smoke test the build
+        run: |
+          $out = ./dist/terra-desk/terra-desk-cli.exe --tool terra-api.py endpoints
+          if ($LASTEXITCODE -ne 0) { throw "the bundled tools don't start" }
+          $out | Select-Object -First 3
+          ./build/mingit/cmd/git.exe --version
+      - name: Build the installer
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6"
+            if (-not (Test-Path "$iscc\ISCC.exe")) { choco install innosetup -y --no-progress }
+            $env:PATH = "$iscc;$env:PATH"
+          }
+          iscc /DAppVersion=${{ steps.v.outputs.version }} packaging/terra-desk.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terra-desk-setup
+          path: terra-desk/dist/terra-desk-setup.exe
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: terra-desk/dist/terra-desk-setup.exe
+          generate_release_notes: true

@@ -19,11 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import prompts
+from . import prompts, system
 from .db import Store
 
-TOKEN_FILE = Path.home() / '.config/terra/token'     # where terra-api.py looks for your Terra key
-CONFIG_FILE = Path(os.environ.get('TERRA_DESK_CONFIG') or Path.home() / '.config/terra-desk/config.toml').expanduser()
+TOKEN_FILE = system.token_file()     # where terra-api.py looks for your Terra key
+CONFIG_FILE = Path(os.environ.get('TERRA_DESK_CONFIG') or system.config_dir() / 'config.toml').expanduser()
 URL = re.compile(r'https?://[^\s)>\]`"]+')
 MD_CODE = re.compile(r'(`+)(.+?)\1')
 MD_LINK = re.compile(r'(\[)([^\]\n]+)(\]\()([^)\s]+)(\))')
@@ -45,7 +45,7 @@ WEEKS = {6: 'Prep Week 1', 7: 'Prep Week 2', 8: 'Prep Week 3', 9: 'Week 1', 10: 
 
 DEFAULT_CONFIG = """# terra-desk settings
 # workspace: where the database, clones, release downloads and videos go
-workspace = "~/terra-desk"
+workspace = "{workspace}"
 # folders of markdown ship pages to import (NN-slug.md with a review URL), globs allowed, e.g. ["~/reviews/batch-*"]
 ship_globs = []
 # your Slack handle, used at the end of notes to players
@@ -53,12 +53,16 @@ handle = "@yourname"
 # the two scripts this app drives (they ship with terra-desk; point elsewhere if you keep your own copies)
 terra_api = ""
 terra_write = ""
+# where the send queue, writes.jsonl and queue dumps live (empty = "send" in the workspace)
+data_dir = ""
+# Linux only: the bubblewrap wrapper used to run builds, and the folder sandboxed programs may live in
 sandbox_run = ""
-# the folder sandboxed programs may live in (empty = the workspace)
 sandbox_root = ""
+# port for the web page on this computer (http://127.0.0.1:<port>)
+port = 8765
 # GitHub lookups: "gh" uses `gh auth token` if you're logged in (5,000 an hour), "" for none (60 an hour)
 github_token = "gh"
-# terminal used for "Run" (empty = auto: $TERMINAL, kitty, foot, alacritty, konsole, gnome-terminal, xterm)
+# terminal for "Open outside" (empty = auto: Windows Terminal or cmd on Windows; $TERMINAL, kitty, foot, ... on Linux)
 terminal = ""
 # plugin files that add features (see README.md)
 plugins = []
@@ -72,10 +76,11 @@ queue_columns = ["mine", "checks", "week", "ship", "player", "hours", "waiting",
 def load_config():
     if not CONFIG_FILE.exists():
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(DEFAULT_CONFIG)
-    c = tomllib.loads(CONFIG_FILE.read_text())
-    here = Path(__file__).resolve().parent.parent
-    c.setdefault('workspace', '~/terra-desk')
+        ws = str(system.default_workspace()).replace(str(Path.home()), '~', 1).replace('\\', '/')
+        CONFIG_FILE.write_text(DEFAULT_CONFIG.replace('{workspace}', ws), encoding='utf-8')
+    c = tomllib.loads(CONFIG_FILE.read_text(encoding='utf-8'))
+    here = system.app_root()
+    c.setdefault('workspace', str(system.default_workspace()))
     c['workspace'] = Path(c['workspace']).expanduser()
     for key, default in (('terra_api', here / 'tools/terra-api.py'), ('terra_write', here / 'tools/terra-write.py'),
                          ('sandbox_run', here / 'tools/sandbox-run')):
@@ -87,7 +92,11 @@ def load_config():
     c['queue_columns'] = [RENAMED_COLUMNS.get(x, x) for x in c.get('queue_columns') or QUEUE_COLUMNS
                           if RENAMED_COLUMNS.get(x, x) in QUEUE_COLUMNS]
     c['sandbox_root'] = Path(c.get('sandbox_root') or c['workspace']).expanduser()
+    c['data_dir'] = Path(c.get('data_dir') or c['workspace'] / 'send').expanduser()
+    c['data_dir'].mkdir(parents=True, exist_ok=True)
+    c['port'] = int(c.get('port') or 8765)
     os.environ['TERRA_HANDLE'] = c['handle']
+    os.environ['TERRA_DATA_DIR'] = str(c['data_dir'])     # the tools keep their queue and log here
     (c['workspace'] / 'pages').mkdir(parents=True, exist_ok=True)
     return c
 
@@ -104,6 +113,7 @@ class Tools:
         self._api = None
 
     def _load(self, path):
+        os.environ['TERRA_DATA_DIR'] = str(self.cfg['data_dir'])
         argv, cwd = sys.argv, os.getcwd()
         sys.argv = [path.name]
         os.chdir(path.parent)
@@ -129,14 +139,24 @@ class Tools:
         terra-api.py only ever sends it to api.github.com. It's never written anywhere."""
         if self._gh is None:
             self._gh = os.environ.get('GITHUB_TOKEN', '')
-            if not self._gh and self.cfg.get('github_token', 'gh') == 'gh' and shutil.which('gh'):
+            tok = self.cfg.get('github_token', 'gh')
+            if not self._gh and tok == 'gh' and shutil.which('gh'):
                 r = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True)
                 self._gh = r.stdout.strip() if r.returncode == 0 else ''
-        return {**os.environ, 'GITHUB_TOKEN': self._gh} if self._gh else dict(os.environ)
+            elif not self._gh and tok and tok != 'gh':
+                self._gh = tok
+        env = system.tool_env({'TERRA_DATA_DIR': str(self.cfg['data_dir'])})
+        return {**env, 'GITHUB_TOKEN': self._gh} if self._gh else env
+
+    def api_argv(self, *args):
+        return system.tool_argv(self.cfg['terra_api'], *args)
+
+    def write_argv(self, *args):
+        return system.tool_argv(self.cfg['terra_write'], *args)
 
     def run_api(self, *args, timeout=600):
         """terra-api.py as a subprocess (read-only commands)."""
-        out = subprocess.run(['python3', '-I', str(self.cfg['terra_api']), *args], capture_output=True, text=True,
+        out = subprocess.run(self.api_argv(*args), capture_output=True, text=True, encoding='utf-8', errors='replace',
                              timeout=timeout, cwd=self.cfg['workspace'], env=self.github_env())
         if out.returncode:
             raise RuntimeError((out.stderr or out.stdout).strip()[-600:])
@@ -179,7 +199,7 @@ class Ship:
 def page_folders(cfg):
     out = [cfg['workspace'] / 'pages']
     for g in cfg['ship_globs']:
-        g = str(Path(g).expanduser())
+        g = str(Path(g).expanduser()).replace('\\', '/')
         base, pat = g.rsplit('/', 1) if '*' in g else (g, '')
         out += sorted(p for p in Path(base).glob(pat) if p.is_dir()) if pat else [Path(base)]
     return [p for p in out if p.is_dir()]
@@ -190,7 +210,7 @@ def test_steps_files(folders):
     for folder in folders:
         f = folder / 'test-steps.md'
         if f.exists():
-            for m in re.finditer(r'^## (\d+) [^\n]*\n(.*?)(?=^## \d+ |\Z)', f.read_text(), re.S | re.M):
+            for m in re.finditer(r'^## (\d+) [^\n]*\n(.*?)(?=^## \d+ |\Z)', f.read_text(encoding='utf-8', errors='ignore'), re.S | re.M):
                 out[(folder.name, int(m.group(1)))] = re.split(r'^### Notes', m.group(2), flags=re.M)[0].strip()
     return out
 
@@ -208,7 +228,7 @@ def import_pages(cfg, store, hooks=None):
             mtime = f.stat().st_mtime
             if seen.get(str(f)) == mtime:
                 continue
-            text = f.read_text(errors='ignore')
+            text = f.read_text(encoding='utf-8', errors='ignore')
             m = REVIEW_ID.search(text[:1500])
             if not m:
                 continue
@@ -341,10 +361,10 @@ def is_review_page(u):
 # ---- Terra state ----
 
 def sent_sids(cfg):
-    log = Path(cfg['terra_write']).parent / 'writes.jsonl'
+    log = Path(os.environ.get('TERRA_WRITE_LOG') or Path(cfg['data_dir']) / 'writes.jsonl')
     sids = set()
     if log.exists():
-        for line in log.read_text().splitlines():
+        for line in log.read_text(encoding='utf-8', errors='replace').splitlines():
             try:
                 e = json.loads(line)
             except ValueError:
@@ -356,7 +376,7 @@ def sent_sids(cfg):
 
 
 def queue_dir(cfg):
-    return Path(os.environ.get('TERRA_WRITE_QUEUE') or Path(cfg['terra_write']).parent / 'send-queue')
+    return Path(os.environ.get('TERRA_WRITE_QUEUE') or Path(cfg['data_dir']) / 'send-queue')
 
 
 def queued_sids(cfg):
@@ -370,10 +390,15 @@ def queued_sids(cfg):
 
 def runner_alive(cfg):
     try:
-        os.kill(int((queue_dir(cfg) / 'runner.pid').read_text()), 0)
-        return True
-    except (OSError, ValueError):
+        return system.pid_alive((queue_dir(cfg) / 'runner.pid').read_text().strip())
+    except OSError:
         return False
+
+
+def runner_control(cfg, word):
+    """Tell a running runner to change its gap (minutes), pause/resume ('pause', 'resume') or 'stop'."""
+    queue_dir(cfg).mkdir(parents=True, exist_ok=True)
+    (queue_dir(cfg) / 'every').write_text(str(word), encoding='utf-8')
 
 
 def terra_waiting(tools):
@@ -392,8 +417,8 @@ def prep_args(cfg, sid, download=True):
 
 
 def dump_folders(cfg):
-    """terra-api.py dump writes each ship's review-page data to queue-json/<stamp>/<id>.json next to the script."""
-    return sorted(p for p in (Path(cfg['terra_api']).parent / 'queue-json').glob('*') if p.is_dir())
+    """terra-api.py dump writes each ship's review-page data to queue-json/<stamp>/<id>.json in the data folder."""
+    return sorted(p for p in (Path(cfg['data_dir']) / 'queue-json').glob('*') if p.is_dir())
 
 
 def import_dump(store, folder):
@@ -401,7 +426,7 @@ def import_dump(store, folder):
     n = 0
     for f in Path(folder).glob('*.json'):
         try:
-            data = json.loads(f.read_text())['shipment']
+            data = json.loads(f.read_text(encoding='utf-8'))['shipment']
         except (OSError, ValueError, KeyError, TypeError):
             continue
         store.set_page(f.stem, data)
@@ -414,7 +439,8 @@ def prep(cfg, tools, sid, download=True):
 
 
 def find_runnables(folder):
-    """Things in a release folder that can be started, best guess first: (path, how)."""
+    """Things in a release folder that can be started, best guess first: (path, how). how is 'exe' (a Windows
+    program: native on Windows, Wine on Linux), 'msi', 'bat', 'java', 'appimage' or 'native' (a Linux binary)."""
     out = []
     if not folder or not Path(folder).is_dir():
         return out
@@ -423,11 +449,18 @@ def find_runnables(folder):
             continue
         name = p.name.lower()
         if name.endswith('.exe') and 'crashhandler' not in name and 'unins' not in name:
-            out.append((p, 'wine'))
+            out.append((p, 'exe'))
+        elif name.endswith('.msi') and system.WINDOWS:
+            out.append((p, 'msi'))
+        elif name.endswith(('.bat', '.cmd')) and system.WINDOWS:
+            out.append((p, 'bat'))
         elif name.endswith('.appimage'):
-            out.append((p, 'appimage'))
+            if not system.WINDOWS:
+                out.append((p, 'appimage'))
         elif name.endswith('.jar'):
             out.append((p, 'java'))
+        elif system.WINDOWS:
+            continue                                      # Linux binaries can't start here
         elif os.access(p, os.X_OK) or p.suffix in ('', '.x86_64', '.out'):
             try:
                 if p.read_bytes()[:4] == b'\x7fELF':
@@ -439,11 +472,12 @@ def find_runnables(folder):
 
 
 def sandbox_command(cfg, folder, exe, how):
-    """The sandbox-run command for a runnable (a list), run from its release folder."""
+    """Linux: the sandbox-run (bubblewrap) command for a runnable (a list), run from its release folder.
+    On Windows, see system.sandbox_launch (Windows Sandbox)."""
     folder = Path(folder)
-    rel = str(exe.relative_to(folder))
+    rel = Path(exe).relative_to(folder).as_posix()
     base = ['env', f"TERRA_SANDBOX_ROOT={cfg['sandbox_root']}", str(cfg['sandbox_run']), '--gui', '--audio']
-    if how == 'wine':
+    if how in ('exe', 'wine'):
         return base + ['--wine', str(folder), 'wine', rel]
     if how == 'java':
         return base + [str(folder), 'java', '-jar', rel]
@@ -454,6 +488,12 @@ def sandbox_command(cfg, folder, exe, how):
 
 def terminal_command(cfg, argv):
     """Run argv in a new terminal window that stays open."""
+    if system.WINDOWS:
+        cmd = subprocess.list2cmdline(argv)
+        term = cfg.get('terminal') or ('wt' if shutil.which('wt') else '')
+        if term == 'wt':
+            return ['wt', 'cmd', '/k', cmd]
+        return ['cmd', '/k', cmd]          # started with CREATE_NEW_CONSOLE, so it gets its own window
     import shlex
     cmd = ' '.join(shlex.quote(a) for a in argv) + '; echo; read -p "[done, Enter to close] " _'
     term = cfg['terminal'] or os.environ.get('TERMINAL') or next(
@@ -467,11 +507,26 @@ def terminal_command(cfg, argv):
 
 # ---- video ----
 
+def ffmpeg_exe():
+    """ffmpeg: the one next to terra-desk.exe or on PATH, else the copy bundled with imageio-ffmpeg."""
+    found = shutil.which('ffmpeg')
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError('ffmpeg is not installed (the Windows installer includes it; on Linux install ffmpeg)') from e
+
+
 def video_info(path):
-    out = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration,size', '-of', 'json', str(path)],
-                         capture_output=True, text=True)
-    f = json.loads(out.stdout or '{}').get('format', {})
-    return float(f.get('duration') or 0), int(f.get('size') or 0)
+    """(duration in seconds, size in bytes), read from ffmpeg's own banner so ffprobe isn't needed."""
+    out = subprocess.run([ffmpeg_exe(), '-hide_banner', '-i', str(path)], capture_output=True, text=True,
+                         encoding='utf-8', errors='replace')
+    m = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', out.stderr)
+    dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+    size = Path(path).stat().st_size if Path(path).exists() else 0
+    return dur, size
 
 
 def compress_video(src, dest, limit=VIDEO_LIMIT):
@@ -487,12 +542,12 @@ def compress_video(src, dest, limit=VIDEO_LIMIT):
     video_k = max(int(total_k - audio_k), 120)
     scale = 'scale=-2:min(ih\\,1080)' if video_k > 2500 else 'scale=-2:min(ih\\,720)' if video_k > 700 else 'scale=-2:min(ih\\,480)'
     log = Path(dest).with_suffix('.ffmpeg2pass')
-    common = ['ffmpeg', '-y', '-v', 'error', '-i', str(src), '-vf', scale, '-c:v', 'libx264', '-preset', 'medium',
+    common = [ffmpeg_exe(), '-y', '-v', 'error', '-i', str(src), '-vf', scale, '-c:v', 'libx264', '-preset', 'medium',
               '-b:v', f'{video_k}k', '-maxrate', f'{int(video_k * 1.3)}k', '-bufsize', f'{video_k * 2}k',
               '-passlogfile', str(log)]
     for n, extra in ((1, ['-pass', '1', '-an', '-f', 'mp4', os.devnull]),
                      (2, ['-pass', '2', '-c:a', 'aac', '-b:a', f'{audio_k}k', '-movflags', '+faststart', str(dest)])):
-        r = subprocess.run(common + extra, capture_output=True, text=True)
+        r = subprocess.run(common + extra, capture_output=True, text=True, encoding='utf-8', errors='replace')
         if r.returncode:
             raise RuntimeError(r.stderr.strip()[-500:])
     for f in Path(dest).parent.glob(log.name + '*'):
@@ -538,10 +593,10 @@ def default_template(kind):
 
 def set_config(cfg, key, value):
     """Change one `key = "value"` line in the config file (keeping its comments) and in cfg."""
-    text = CONFIG_FILE.read_text() if CONFIG_FILE.exists() else ''
+    text = CONFIG_FILE.read_text(encoding='utf-8') if CONFIG_FILE.exists() else ''
     line = f'{key} = {json.dumps(value)}'
-    text, n = re.subn(rf'^{re.escape(key)}\s*=.*$', line.replace('\\', '\\\\'), text, count=1, flags=re.M)
-    CONFIG_FILE.write_text(text if n else text.rstrip('\n') + '\n' + line + '\n')
+    text, n = re.subn(rf'^{re.escape(key)}\s*=.*$', lambda _m: line, text, count=1, flags=re.M)
+    CONFIG_FILE.write_text(text if n else text.rstrip('\n') + '\n' + line + '\n', encoding='utf-8')
     cfg[key] = value
 
 
@@ -552,14 +607,15 @@ def state_file():
 
 def load_state():
     try:
-        return json.loads(state_file().read_text())
+        return json.loads(state_file().read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return {}
 
 
 def save_state(**values):
     state = {**load_state(), **values}
-    state_file().write_text(json.dumps(state, indent=1))
+    state_file().parent.mkdir(parents=True, exist_ok=True)
+    state_file().write_text(json.dumps(state, indent=1), encoding='utf-8')
     return state
 
 
@@ -572,13 +628,13 @@ def token_state():
     """'env' (TERRA_TOKEN is set, it wins), 'file' (saved in TOKEN_FILE) or 'none'. Never the key itself."""
     if os.environ.get('TERRA_TOKEN'):
         return 'env'
-    return 'file' if TOKEN_FILE.exists() and TOKEN_FILE.read_text().strip() else 'none'
+    return 'file' if TOKEN_FILE.exists() and TOKEN_FILE.read_text(encoding='utf-8').strip() else 'none'
 
 
 def save_token(key):
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as f:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(key.strip().strip('"') + '\n')
     os.chmod(TOKEN_FILE, 0o600)
 
