@@ -661,9 +661,11 @@ class Desk:
         self.dumping = True
 
         def done(code):
-            self.dumping = False
-            new = [f for f in core.dump_folders(self.cfg) if f not in before]
-            n = sum(core.import_dump(self.store, f) for f in new)
+            try:
+                new = [f for f in core.dump_folders(self.cfg) if f not in before]
+                n = sum(core.import_dump(self.store, f) for f in new)
+            finally:
+                self.dumping = False          # only once the pages are cached, so nothing reads them half-imported
             self.say(f'dump finished: {out}, {n} review pages cached' if code == 0 else
                      f'dump stopped (exit {code}); {n} review pages cached so far')
             if self.cur_sid:
