@@ -204,6 +204,7 @@ class Desk:
         return {'drafted': sum(1 for s in self.ships if s.state == 'drafted'),
                 'notes': sum(1 for s in self.ships if s.state == 'notes'),
                 'send_queue': len(core.queued_sids(self.cfg)), 'runner': core.runner_alive(self.cfg),
+                'failed': len(core.failed_sends(self.cfg)),
                 'runner_job': self.runner_job.id if self.runner_job and self.runner_job.running else None,
                 'in_queue': sum(1 for s in self.ships if s.item), 'checking': self.checking,
                 'checks_waiting': len(self.check_queue), 'claimed': self.claimed, 'token': core.token_state(),
@@ -324,6 +325,7 @@ class Desk:
              'facts_html': review_page.md(re.sub(r'^# .*\n', '', s.page_text)) if s.page_text else
              '<p class="muted"><i>No imported page for this ship.</i></p>',
              'test': self.test_segments(s, page), 'demo': ((page or {}).get('project') or {}).get('demoUrl'),
+             'repo_url': ((page or {}).get('project') or {}).get('codeUrl'),
              'release_dir': s.release_dir, 'repo_dir': self.store.work(sid).get('repo_dir'),
              'screenshots': [{'url': self.serve_file(p), 'name': p.name} for p in self.screenshots(s)[:8]],
              'test_actions': [label for label, _ in self.hooks.test_actions],
@@ -631,14 +633,16 @@ class Desk:
                          stderr=subprocess.DEVNULL, cwd=job.cwd, **kw)
         return 'started in a new terminal window'
 
-    def attach_video(self, sid, src):
+    def attach_video(self, sid, src, keep_source=False):
+        """Shrink a video in the background and attach it. keep_source: it's the reviewer's own file (from the
+        clipboard or their recordings), so it's never deleted."""
         s = self.ship(sid)
         dest = self.cfg['workspace'] / 'videos' / f'{sid}.mp4'
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         def done(res, err):
             try:
-                if Path(src) != dest:
+                if not keep_source and Path(src) != dest:
                     Path(src).unlink(missing_ok=True)
             except OSError:
                 pass
@@ -650,6 +654,25 @@ class Desk:
             self.refresh_one(sid)
         tmp = dest.with_name(f'{sid}.compressing.mp4')
         self.background(lambda: Path(core.compress_video(src, tmp)).replace(dest) or dest, done)
+
+    def video_from_clipboard(self, sid):
+        """Attach the video file you copied (Ctrl+C on it in File Explorer, or "Copy as path")."""
+        found = [Path(p) for p in system.clipboard_paths()]
+        videos = [p for p in found if p.suffix.lower() in VIDEO_TYPES and p.is_file()]
+        if not videos:
+            if found:
+                raise Fail(f'{found[0].name} is not a video ({", ".join(VIDEO_TYPES)})')
+            raise Fail('No video file on the clipboard. In File Explorer, right-click the video and choose Copy, then try again.')
+        self.attach_video(sid, videos[0], keep_source=True)
+        return f'shrinking {videos[0].name}…'
+
+    def latest_recording(self, sid):
+        """Attach the newest video in your Videos folder (where Snipping Tool and Xbox Game Bar save recordings)."""
+        newest = system.newest_recording(VIDEO_TYPES)
+        if not newest:
+            raise Fail('No recent recording found in your Videos folder')
+        self.attach_video(sid, newest, keep_source=True)
+        return f'shrinking {newest.name} ({time.strftime("%b %d %H:%M", time.localtime(newest.stat().st_mtime))})…'
 
     # ---- the queue and stashes ----
     def dump_queue(self):
@@ -694,6 +717,7 @@ class Desk:
         if float(every) <= 0:
             raise Fail('minutes between sends must be above 0')
         argv = self.tools.write_argv('run', '--every', f'{float(every):g}', '--hold', str(int(hold)), '--from-desk')
+        (core.queue_dir(self.cfg) / 'every').unlink(missing_ok=True)     # a stop left over would end it at once
 
         def done(code):
             self.say(f'the runner stopped (exit {code})')
@@ -749,10 +773,22 @@ class Desk:
                 j.stop()
 
     def timers(self):
-        last = {'refetch': time.time(), 'reimport': time.time(), 'beat': time.time()}
+        last = {'refetch': time.time(), 'reimport': time.time(), 'beat': time.time(), 'sends': time.time()}
+        marks = core.send_marks(self.cfg)
         while not self.stopping:
             time.sleep(1)
             now = time.time()
+            if now - last['sends'] >= 3:          # the sender works in its own process: notice what it sent
+                last['sends'] = now
+                try:
+                    new = core.send_marks(self.cfg)
+                    if new != marks:
+                        marks = new
+                        self.reload()
+                        if self.cur_sid:
+                            self.rev[self.cur_sid] += 1
+                except OSError:
+                    pass
             if now - last['refetch'] >= 120:
                 last['refetch'] = now
                 self.refetch()
@@ -881,6 +917,8 @@ def route(desk, method, path, b, q, handler, upload):
             return {'stashes': desk.stashes()}
         if head == 'rubric':
             return rubric.guide()
+        if head == 'failed':
+            return {'failed': core.failed_sends(desk.cfg)}
         if head == 'settings':
             return desk.settings()
         raise Fail('unknown request')
@@ -940,6 +978,10 @@ def route(desk, method, path, b, q, handler, upload):
                     left -= len(chunk)
             desk.attach_video(sid, src)
             return {'msg': 'compressing the video…'}
+        if act == 'video-clipboard':
+            return {'msg': desk.video_from_clipboard(sid)}
+        if act == 'video-latest':
+            return {'msg': desk.latest_recording(sid)}
         if act == 'remove-video':
             desk.store.set_work(sid, video=None)
             desk.refresh_one(sid)
@@ -1008,6 +1050,13 @@ def route(desk, method, path, b, q, handler, upload):
             desk.jobs.close(job.id)
             return {'ok': True}
         raise Fail('unknown request')
+    if head == 'failed':
+        try:
+            core.failed_send(desk.cfg, str(b.get('name') or ''), bool(b.get('retry')))
+        except RuntimeError as e:
+            raise Fail(str(e)) from e
+        desk.reload()
+        return {'msg': 'back in the send queue' if b.get('retry') else 'removed'}
     if head == 'runner':
         act = parts[1] if len(parts) > 1 else ''
         if act == 'start':

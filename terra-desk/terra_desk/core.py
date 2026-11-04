@@ -395,6 +395,42 @@ def runner_alive(cfg):
         return False
 
 
+def failed_sends(cfg):
+    """Reviews the sender parked in send-queue/failed because the ship changed or a claim failed, newest first:
+    [{'name', 'sid', 'title', 'verdict', 'why'}]."""
+    folder = queue_dir(cfg) / 'failed'
+    out = []
+    for f in sorted(folder.glob('*.json'), key=lambda f: f.stat().st_mtime, reverse=True) if folder.is_dir() else []:
+        try:
+            j = json.loads(f.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            j = {}
+        why = f.with_name(f.stem + '.why.txt')
+        out.append({'name': f.name, 'sid': j.get('sid'), 'title': j.get('title') or f.name, 'verdict': j.get('verdict'),
+                    'why': why.read_text(encoding='utf-8').strip() if why.exists() else ''})
+    return out
+
+
+def failed_send(cfg, name, retry):
+    """Put a failed review back in the send queue (it is checked again before it goes out), or drop it."""
+    folder = queue_dir(cfg) / 'failed'
+    f = folder / Path(name).name
+    if f.suffix != '.json' or not f.exists():
+        raise RuntimeError('no such failed send')
+    if retry:
+        f.replace(queue_dir(cfg) / f.name)
+    else:
+        f.unlink()
+    f.with_name(f.stem + '.why.txt').unlink(missing_ok=True)
+
+
+def send_marks(cfg):
+    """Something that changes whenever the sender sends, parks or is given a review: to know when to refresh."""
+    q, log = queue_dir(cfg), Path(cfg['data_dir']) / 'writes.jsonl'
+    names = tuple(sorted(x.name for x in q.glob('*.json'))) if q.is_dir() else ()
+    return names, log.stat().st_mtime if log.exists() else 0, len(list((q / 'failed').glob('*.json'))) if (q / 'failed').is_dir() else 0
+
+
 def runner_control(cfg, word):
     """Tell a running runner to change its gap (minutes), pause/resume ('pause', 'resume') or 'stop'."""
     queue_dir(cfg).mkdir(parents=True, exist_ok=True)
@@ -788,24 +824,33 @@ def image_path(cfg, url):
     return cfg['workspace'] / 'images' / (hashlib.sha256(url.encode()).hexdigest()[:24] + '.' + (ext.group(1) if ext else 'img'))
 
 
+IMAGE_MAGIC = (b'\x89PNG', b'\xff\xd8\xff', b'GIF8', b'RIFF')
+
+
 def fetch_images(cfg, urls):
-    """Download images (screenshot, devlog images) into the workspace. Returns {url: path} for the ones on disk."""
+    """Download images (screenshot, devlog images) into the workspace. Returns {url: path} for the ones on disk.
+    A download goes to a temporary name first, so a failed one never leaves a broken file that looks finished, and
+    images a CDN labels application/octet-stream are kept when their bytes are an image."""
     limit = 15 * 1024 * 1024
     out = {}
     for u in urls:
         dest = image_path(cfg, u)
         if not dest.exists():
             dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + '.part')
             try:
                 req = urllib.request.Request(u, headers={'User-Agent': 'terra-desk (review helper)'})
                 with urllib.request.urlopen(req, timeout=20) as r:
-                    if not (r.headers.get('Content-Type') or '').startswith('image/'):
-                        continue
+                    ctype = (r.headers.get('Content-Type') or '').lower()
                     data = r.read(limit + 1)
-                if len(data) > limit:
+                if len(data) > limit or not (ctype.startswith('image/') or data[:4].startswith(IMAGE_MAGIC)):
                     continue
-                dest.write_bytes(data)
+                if data[:4] == b'RIFF' and data[8:12] != b'WEBP':
+                    continue
+                tmp.write_bytes(data)
+                tmp.replace(dest)
             except Exception:  # noqa: BLE001 - a missing image just shows as a link
+                tmp.unlink(missing_ok=True)
                 continue
         out[u] = dest
     return out

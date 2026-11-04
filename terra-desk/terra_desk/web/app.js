@@ -104,6 +104,7 @@ function showStatus(s) {
     h('button', { class: 'pill' + (s.runner ? ' on' : ''), title: 'Send your queued reviews', onclick: openSending },
       `${s.send_queue} waiting to send · sender ${s.runner ? 'on' : 'off'}`),
   ];
+  if (s.failed) pills.push(h('button', { class: 'pill warn', title: 'Reviews the sender could not send', onclick: openSending }, `${s.failed} failed to send`));
   if (s.checking) pills.push(h('span', { class: 'pill' }, `checking${s.checks_waiting ? ` (+${s.checks_waiting} more)` : ''}…`));
   $('#status').replaceChildren(...pills);
   const banner = $('#banner');
@@ -182,8 +183,8 @@ function fillList() {
     h('button', { onclick: () => select(s.sid) },
       h('span', { class: 'ship-title' }, (s.num ? `${s.num}. ` : '') + s.title),
       h('span', { class: 'ship-meta' }, [s.username, s.week, s.in_queue ? `${(s.seconds / 3600).toFixed(1)}h` : null,
-        s.waiting ? `waiting ${s.waiting.replace(' ago', '')}` : null].filter(Boolean).join(' · ')),
-      h('span', { class: 'badges' }, stateBadge(s), checkBadge(s.check), s.platforms.map((p) => h('span', { class: 'badge plain' }, p)))))));
+        s.waiting ? `waiting ${s.waiting.replace(' ago', '')}` : null, s.platforms.join(', ') || null].filter(Boolean).join(' · ')),
+      (stateBadge(s) || checkBadge(s.check)) ? h('span', { class: 'badges' }, stateBadge(s), checkBadge(s.check)) : null))));
   if (!vis.length) list.append(h('li', { class: 'empty-list' }, S.rows.length ? 'No ships match. Try "Everything in the queue" or clear the search.'
     : (S.status.token === 'none' ? 'Add your Terra key to load the queue.' : 'Loading the queue…')));
   const inQueue = S.rows.filter((s) => s.in_queue).length;
@@ -262,9 +263,19 @@ function renderHead(d) {
   claim.append(h('button', { onclick: skip, title: d.skipped ? 'Put it back in the list' : 'Hide it from "Waiting for review" (it stays under "Skipped")' }, d.skipped ? 'Unskip' : 'Skip'));
   const meta = [d.username && `by ${d.username}`, d.week, d.hours !== null && d.hours !== undefined ? `${d.hours}h tracked` : null,
     d.waiting && `waiting ${d.waiting.replace(' ago', '')}`, d.platforms.length ? d.platforms.join(', ') : null].filter(Boolean).join(' · ');
+  const links = h('div', { class: 'row' },
+    d.repo_url && h('button', { class: 'link', onclick: () => openUrl(d.repo_url) }, 'Open the repo ↗'),
+    d.demo && d.demo !== d.repo_url && h('button', { class: 'link', onclick: () => openUrl(d.demo) }, 'Open the demo ↗'));
   $('#ship-head').replaceChildren(
-    h('div', { class: 'grow' }, h('h1', {}, (d.num ? `${d.num}. ` : '') + d.title), h('div', { class: 'meta' }, meta)),
+    h('div', { class: 'grow' }, h('h1', {}, (d.num ? `${d.num}. ` : '') + d.title), h('div', { class: 'meta' }, meta), links),
     h('div', { class: 'side' }, claim));
+  // a tick on each step that's done
+  const done = { 1: !!(d.notes || '').trim(), 2: d.draft && !d.template_left };
+  $$('#steps button').forEach((b) => {
+    const k = +b.dataset.step;
+    b.classList.toggle('done', !!done[k]);
+    b.title = k === 2 && d.state === 'queued' ? 'Queued to send' : done[k] ? 'Done' : '';
+  });
 }
 
 function showStep(i) {
@@ -356,24 +367,30 @@ function dirtyFor(sid) { return (S.dirty[sid] ||= {}); }
 function fieldHelp(key) {
   const g = guideFor(key);
   if (!g) return null;
-  return h('div', { class: 'help' }, g.help,
-    g.points ? h('ul', {}, g.points.map((p) => h('li', {}, p))) : null,
-    g.example ? h('details', { class: 'example' }, h('summary', {}, 'Show an example'), h('pre', {}, g.example)) : null);
+  const more = g.points || g.example;
+  return h('div', { class: 'help' }, g.help, more ? h('details', { class: 'example' }, h('summary', {}, 'Tips and an example'),
+    g.points ? h('ul', {}, g.points.map((p) => h('li', {}, p))) : null, g.example ? h('pre', {}, g.example) : null) : null);
 }
 
 function renderDecide(d) {
   const kids = [];
   const notes = (S.detail.notes || '').trim();
-  kids.push(h('div', { class: 'section' }, h('h2', {}, 'Your notes', h('span', { class: 'grow' }), h('button', { class: 'link', onclick: () => showStep(1) }, 'Edit')),
+  kids.push(h('details', { class: 'section fold', open: !d.draft || undefined },
+    h('summary', {}, h('h2', {}, 'Your notes'), h('span', { class: 'muted small grow' }, notes ? notes.split('\n')[0].slice(0, 80) : 'none yet'),
+      h('button', { class: 'link', onclick: (e) => { e.preventDefault(); showStep(1); } }, 'Edit')),
     notes ? h('div', { class: 'notes-preview' }, notes) : h('p', { class: 'muted' }, 'No notes yet. Write them on the Test it step.')));
 
-  const verdicts = (S.rubric?.verdicts || []).map((v) => h('button', {
-    class: 'verdict' + (d.draft && d.kind === v.kind ? ' on' : ''), style: { '--tint': TINT[v.kind] }, onclick: () => switchVerdict(v.kind),
-  }, h('b', {}, v.label), h('span', {}, v.when)));
-  const pick = h('div', { class: 'section' }, h('h2', {}, 'Choose a verdict'),
-    h('p', { class: 'lead' }, 'Picking one fills in its template below. You can switch later; the note text carries over.'),
-    h('div', { class: 'verdicts' }, verdicts));
-  kids.push(pick);
+  if (!d.draft) {
+    const verdicts = (S.rubric?.verdicts || []).map((v) => h('button', { class: 'verdict', style: { '--tint': TINT[v.kind] }, onclick: () => switchVerdict(v.kind) },
+      h('b', {}, v.label), h('span', {}, v.when)));
+    kids.push(h('div', { class: 'section' }, h('h2', {}, 'Choose a verdict'),
+      h('p', { class: 'lead' }, 'Picking one fills in its template. You can switch later; the note text carries over.'),
+      h('div', { class: 'verdicts' }, verdicts)));
+  } else {
+    kids.push(h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Verdict' }, h('span', { class: 'seg-label' }, 'Verdict'),
+      (S.rubric?.verdicts || []).map((v) => h('button', { class: d.kind === v.kind ? 'on' : '', role: 'radio', 'aria-checked': String(d.kind === v.kind),
+        style: { '--tint': TINT[v.kind] }, title: v.when, onclick: () => switchVerdict(v.kind) }, v.label))));
+  }
 
   if (!d.draft) {
     if (d.suggested_html !== undefined) kids.push(h('div', { class: 'section' }, h('h2', {}, 'There is a suggested draft'),
@@ -385,8 +402,7 @@ function renderDecide(d) {
   }
 
   const dirty = dirtyFor(d.sid);
-  const form = h('div', { class: 'section' }, h('h2', {}, 'Write the review', h('span', { class: 'badge', style: { '--tint': TINT[d.kind] } }, d.badge),
-    h('span', { class: 'grow' }), h('span', { class: 'saved', id: 'draft-saved' }, 'Saved')));
+  const form = h('div', { class: 'section' }, h('h2', {}, 'Write the review', h('span', { class: 'grow' }), h('span', { class: 'saved', id: 'draft-saved' }, 'Saved')));
   if (d.kind === 'approve') form.append(approveNumbers(d, dirty));
   if (d.kind === 'move') {
     const sel = h('select', { onchange: (e) => { dirty.move_to = e.target.value; draftChanged(); } },
@@ -395,7 +411,7 @@ function renderDecide(d) {
     form.append(h('div', { class: 'form-field' }, h('label', {}, 'Move it to'), sel));
   }
   if (d.kind === 'changes') {
-    form.append(h('div', { class: 'notice info' }, h('b', {}, 'Clear reasons to request changes'),
+    form.append(h('details', { class: 'notice info' }, h('summary', {}, h('b', {}, 'Clear reasons to request changes')),
       h('ul', {}, (S.rubric?.changes_reasons || []).map((r) => h('li', {}, r))),
       h('div', { class: 'small', style: { marginTop: '8px' } }, h('b', {}, "Don't request changes for: "), (S.rubric?.changes_dont || []).join(' '))));
   }
@@ -409,32 +425,74 @@ function renderDecide(d) {
     form.append(h('div', { class: 'notice' }, h('div', { class: 'row' }, h('b', { class: 'grow' }, 'Noticed while drafting'),
       h('button', { onclick: () => act(`/api/ship/${d.sid}/clear-remarks`) }, 'Clear')), h('div', { class: 'content', html: d.remarks_html })));
   }
-  if (d.kind === 'approve') {
-    form.append(h('div', { class: 'form-field' }, h('label', {}, 'Test video'),
-      h('div', { class: 'help' }, 'A recording of your test. It is shrunk to under 20 MB and uploaded with the approve.'),
-      h('div', { class: 'row' }, h('span', { id: 'video-label' }, d.video ? `${d.video.name} (${d.video.mb} MB)` : 'No video yet'),
-        h('button', { onclick: () => $('#video-file').click() }, d.video ? 'Replace video…' : 'Attach video…'),
-        d.video_set ? h('button', { onclick: () => act(`/api/ship/${d.sid}/remove-video`) }, 'Remove') : null)));
-  }
+  if (d.kind === 'approve') form.append(videoBox(d));
   kids.push(form);
 
-  const send = h('div', { class: 'section' }, h('h2', {}, 'Send it'));
   if (d.template_left) {
-    send.append(h('div', { class: 'notice' }, h('b', {}, 'Replace these reminders in (parentheses) before queueing:'),
+    kids.push(h('div', { class: 'notice' }, h('b', {}, 'Replace these reminders in (parentheses) before queueing:'),
       h('ul', { class: 'small' }, (d.template_left_all || [d.template_left]).map((x) => h('li', {}, x)))));
-  } else {
-    send.append(h('p', { class: 'lead' }, 'Queueing checks your draft against the live ship, then adds it to the send queue. The sender (top bar) sends it.'));
   }
-  send.append(h('div', { class: 'actionbar' },
-    h('button', { class: 'primary', onclick: queue, title: 'Ctrl+Enter' }, 'Queue for sending'),
-    h('button', { onclick: () => saveDraft(true) }, 'Save draft'),
-    h('span', { class: 'grow' }),
-    h('button', { onclick: () => act(`/api/ship/${d.sid}/unqueue`) }, 'Take out of send queue'),
-    h('button', { class: 'danger', onclick: deleteDraft }, 'Delete draft')));
-  if (d.decision_actions.length) send.append(h('div', { class: 'actionbar' }, actions(d)));
-  kids.push(send);
+  // always in reach at the bottom of the window
+  const queued = d.state === 'queued';
+  kids.push(h('div', { class: 'sendbar' },
+    h('button', { class: 'primary', onclick: queue, title: 'Checks the draft against the live ship, then adds it to the send queue (Ctrl+Enter)',
+      disabled: queued || !!d.template_left || undefined }, queued ? 'Queued ✓' : 'Queue for sending'),
+    h('button', { onclick: () => saveDraft(true) }, 'Save'),
+    h('span', { class: 'muted small grow' }, queued ? 'It goes out when the sender runs (top bar).' : d.template_left ? 'Fill in the reminders first.' : 'Ready to queue.'),
+    actions(d),
+    h('div', { class: 'menu-wrap' }, h('button', { onclick: (e) => { e.stopPropagation(); const m = $('#draft-menu'); const was = m.classList.contains('open'); closeMenus(); if (!was) m.classList.add('open'); } }, '⋯'),
+      h('div', { class: 'menu up', id: 'draft-menu' },
+        h('button', { class: 'item', onclick: () => { closeMenus(); act(`/api/ship/${d.sid}/unqueue`); } }, 'Take out of the send queue'),
+        h('button', { class: 'item danger', onclick: () => { closeMenus(); deleteDraft(); } }, 'Delete this draft')))));
   $('#step-2').replaceChildren(...kids);
 }
+
+function videoBox(d) {
+  const zone = h('div', { class: 'dropzone', id: 'video-zone', tabindex: '0' },
+    h('div', {}, d.video ? h('b', {}, `✓ ${d.video.name} (${d.video.mb} MB)`) : h('b', {}, 'No video yet')),
+    h('div', { class: 'muted small', id: 'video-label' }, 'Drop a video here, press Ctrl+V to paste one you copied, or:'),
+    h('div', { class: 'row' },
+      h('button', { title: 'Copy the video in File Explorer first (right-click → Copy)', onclick: () => act(`/api/ship/${d.sid}/video-clipboard`) }, 'Paste copied video'),
+      h('button', { title: 'The newest video in your Videos folder (Snipping Tool and Xbox Game Bar save there)', onclick: () => act(`/api/ship/${d.sid}/video-latest`) }, 'Use my latest recording'),
+      h('button', { onclick: () => $('#video-file').click() }, 'Choose a file…'),
+      d.video_set ? h('button', { class: 'danger', onclick: () => act(`/api/ship/${d.sid}/remove-video`) }, 'Remove') : null));
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('over');
+    const f = [...(e.dataTransfer?.files || [])].find(isVideo);
+    if (f) uploadVideo(f); else say('That is not a video file', true);
+  });
+  return h('div', { class: 'form-field' }, h('label', {}, 'Test video'),
+    h('div', { class: 'help' }, 'A recording of your test. It is shrunk to under 20 MB and uploaded with the approve.'), zone);
+}
+
+const VIDEO_EXT = /\.(mp4|mkv|webm|mov|avi)$/i;
+const isVideo = (f) => f && (f.type.startsWith('video/') || VIDEO_EXT.test(f.name));
+
+async function uploadVideo(file) {
+  const d = S.detail;
+  if (!d) return;
+  const label = $('#video-label');
+  if (label) label.textContent = `Uploading ${file.name}…`;
+  try {
+    await api('POST', `/api/ship/${d.sid}/video`, undefined, { body: file, headers: { 'X-Filename': encodeURIComponent(file.name || 'pasted.mp4'), 'Content-Type': 'application/octet-stream' } });
+    if (label) label.textContent = 'Shrinking the video… it shows here when it is ready.';
+  } catch (err) { say(`Video failed: ${err.message}`, true); if (label) label.textContent = 'Drop a video here, press Ctrl+V to paste one you copied, or:'; }
+}
+
+// Ctrl+V on the Decide step of an approve: a video the browser can see is uploaded; a file copied in File Explorer
+// (which browsers don't hand over) is read by terra-desk from the clipboard instead. Pasting text into a box still works.
+document.addEventListener('paste', (e) => {
+  const d = S.detail;
+  if (!d || S.step !== 2 || d.kind !== 'approve') return;
+  const file = [...(e.clipboardData?.files || [])].find(isVideo);
+  if (file) { e.preventDefault(); uploadVideo(file); return; }
+  if (e.target.matches('input, textarea')) return;
+  e.preventDefault();
+  act(`/api/ship/${d.sid}/video-clipboard`);
+});
 
 function approveNumbers(d, dirty) {
   const levels = S.rubric?.multipliers || [];
@@ -558,17 +616,10 @@ async function claimShip() {
   await act(`/api/ship/${d.sid}/claim`);
 }
 
-$('#video-file').addEventListener('change', async (e) => {
+$('#video-file').addEventListener('change', (e) => {
   const file = e.target.files[0];
   e.target.value = '';
-  const d = S.detail;
-  if (!file || !d) return;
-  const label = $('#video-label');
-  if (label) label.textContent = 'Uploading…';
-  try {
-    await api('POST', `/api/ship/${d.sid}/video`, undefined, { body: file, headers: { 'X-Filename': encodeURIComponent(file.name), 'Content-Type': 'application/octet-stream' } });
-    if (label) label.textContent = 'Shrinking the video… (it shows here when ready)';
-  } catch (err) { say(`Video failed: ${err.message}`, true); if (label) label.textContent = 'No video yet'; }
+  if (file) uploadVideo(file);
 });
 
 // ---- links: web links open in your browser; Terra review pages never (opening one claims the ship) ----
@@ -656,8 +707,10 @@ async function quit() {
 }
 
 // ---- sending ----
-function openSending() {
+async function openSending() {
   const s = S.status;
+  let failed = [];
+  try { failed = (await api('GET', '/api/failed')).failed; } catch (e) { /* shown by api() */ }
   const body = [h('p', {}, `${s.send_queue} review${s.send_queue === 1 ? '' : 's'} waiting to send.`),
     h('p', { class: 'muted' }, 'The sender sends one review every few minutes, claiming each ship right before it goes out. It keeps going if you close the window.')];
   if (!s.runner) {
@@ -679,6 +732,14 @@ function openSending() {
       h('button', { onclick: async () => { const m = await ask('Minutes between sends:', { input: '4' }); if (m) act('/api/runner/control', { word: m }); } }, 'Change the gap…'),
       control('stop', 'Stop (gives back its claims)'),
       s.runner_job ? h('button', { onclick: () => { $('#dialog').close(); openJob(s.runner_job); } }, 'Show what it is doing') : null));
+  }
+  if (failed.length) {
+    body.push(h('h3', {}, 'Could not be sent'),
+      h('p', { class: 'muted' }, 'The sender parks a review here when the ship changed since you queued it, or it could not claim it. Check the ship, then try again or remove it.'),
+      failed.map((f) => h('div', { class: 'stash-row' },
+        h('div', { class: 'grow' }, h('b', {}, `${f.title}${f.verdict ? ` (${f.verdict})` : ''}`), h('div', { class: 'muted small', style: { whiteSpace: 'pre-wrap' } }, f.why || 'no reason given')),
+        h('button', { onclick: async () => { await act('/api/failed', { name: f.name, retry: true }); openSending(); } }, 'Try again'),
+        h('button', { class: 'danger', onclick: async () => { await act('/api/failed', { name: f.name }); openSending(); } }, 'Remove'))));
   }
   openDialog('Send queued reviews', body);
 }

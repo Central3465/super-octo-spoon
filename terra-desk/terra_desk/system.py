@@ -248,3 +248,63 @@ def open_window(url, mode='app'):
             except OSError:
                 pass
     webbrowser.open(url)
+
+
+# ---- the clipboard and recordings (for attaching a test video) ----
+
+def clipboard_paths():
+    """Files on the clipboard: ones copied in File Explorer (Ctrl+C), or a path copied as text ("Copy as path").
+    Linux: a text/uri-list or path from wl-paste or xclip."""
+    out = []
+    if WINDOWS:
+        script = ('$f = Get-Clipboard -Format FileDropList -ErrorAction SilentlyContinue; '
+                  'if ($f) { $f | ForEach-Object { $_.FullName } } else { Get-Clipboard -Raw -ErrorAction SilentlyContinue }')
+        try:
+            r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-STA', '-Command', script],
+                               capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15)
+            out = r.stdout.splitlines()
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+    else:
+        for cmd in (['wl-paste', '--no-newline'], ['xclip', '-selection', 'clipboard', '-o']):
+            if shutil.which(cmd[0]):
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if r.returncode == 0:
+                    out = r.stdout.splitlines()
+                    break
+    paths = []
+    for line in out:
+        line = line.strip().strip('"').strip("'")
+        if line.startswith('file://'):
+            from urllib.parse import unquote, urlsplit
+            line = unquote(urlsplit(line).path)
+            if WINDOWS and line.startswith('/'):
+                line = line[1:]
+        if line and len(line) < 1024 and (line.startswith(('/', '\\')) or (len(line) > 2 and line[1] == ':')):
+            paths.append(line)
+    return paths
+
+
+def recording_folders():
+    home = Path.home()
+    return [home / 'Videos', home / 'Videos' / 'Captures', home / 'Videos' / 'Screen Recordings', home / 'Desktop']
+
+
+def newest_recording(types, max_age_days=2):
+    """The newest video saved in the last couple of days in Videos (Snipping Tool / Xbox Game Bar save there)."""
+    import time
+    best = None
+    for d in recording_folders():
+        if not d.is_dir():
+            continue
+        for p in d.iterdir():
+            try:
+                if p.is_file() and p.suffix.lower() in types and time.time() - p.stat().st_mtime < max_age_days * 86400:
+                    if best is None or p.stat().st_mtime > best.stat().st_mtime:
+                        best = p
+            except OSError:
+                continue
+    return best

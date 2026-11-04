@@ -489,7 +489,8 @@ NOT_GIT = ('itch.io', 'github.io', 'github.dev', 'codeforces.com', 'replit.com',
            'google.com', 'youtube.com', 'youtu.be', 'vercel.app', 'netlify.app', 'hackclub.app')
 GIT_SAFE = ['-c', 'core.hooksPath=' + os.devnull, '-c', 'credential.helper=', '-c', 'core.fsmonitor=false',
             '-c', 'submodule.recurse=false', '-c', 'core.quotePath=false', '-c', 'advice.detachedHead=false',
-            '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always']
+            '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always'] + \
+    (['-c', 'core.longpaths=true'] if os.name == 'nt' else [])   # Windows: deep paths in a repo would fail to check out
 NO_LFS = ['-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false']
 MB = 1024 * 1024
 
@@ -675,9 +676,10 @@ class Web:
 
     def download(self, url, dest, cap):
         """Save url to dest, giving up past cap bytes. Returns the size."""
-        got = 0
+        got, made = 0, False
         try:
             with self.open(url, accept='application/octet-stream') as r, open(dest, 'xb') as f:
+                made = True
                 while True:
                     chunk = r.read(MB)
                     if not chunk:
@@ -687,7 +689,7 @@ class Web:
                         raise WebError(f'bigger than the {size_str(cap)} left under --max-size')
                     f.write(chunk)
         except Exception as e:
-            if dest.exists() and got:  # don't leave half a file behind
+            if made and dest.exists():  # don't leave half (or an empty) file behind
                 dest.unlink()
             if isinstance(e, WebError):
                 raise
@@ -906,8 +908,28 @@ def ship_worktree(g, clone, sha, warn):
     die(f'too many {clone.name}-ship-N folders')
 
 
+WIN_RESERVED = re.compile(r'^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$', re.I)
+
+
+def safe_part(part):
+    """One path component as a name Windows accepts: no :*?"<>| or control characters, no trailing dots or spaces,
+    and not a reserved device name (CON, NUL, COM1, ...). Elsewhere only control characters are replaced."""
+    if os.name != 'nt':
+        return re.sub(r'[\x00-\x1f]', '_', part)
+    part = re.sub(r'[:*?"<>|\x00-\x1f]', '_', part).rstrip(' .') or '_'
+    return '_' + part if WIN_RESERVED.match(part) else part
+
+
+def long_path(p):
+    """On Windows, a path that may be longer than 260 characters (the extended-length prefix); elsewhere unchanged."""
+    p = str(p)
+    return '\\\\?\\' + os.path.abspath(p) if os.name == 'nt' and not p.startswith('\\\\?\\') else p
+
+
 def unzip(path, dest, budget):
-    """Extract a zip into dest with a zip-slip check. Never sets permissions, so nothing becomes executable."""
+    """Extract a zip into dest with a zip-slip check. Never sets permissions, so nothing becomes executable.
+    Names Windows can't hold are cleaned up, macOS junk (__MACOSX, .DS_Store) is left out, and a file that can't be
+    written is listed as skipped instead of stopping the whole unzip."""
     skipped = []
     with zipfile.ZipFile(path) as z:
         total = sum(i.file_size for i in z.infolist())
@@ -918,18 +940,24 @@ def unzip(path, dest, budget):
         for i in z.infolist():
             name = i.filename.replace('\\', '/')
             parts = [x for x in name.split('/') if x not in ('', '.')]
+            if parts and (parts[0] == '__MACOSX' or parts[-1] == '.DS_Store'):
+                continue
             unsafe = (name.startswith('/') or '..' in parts or (parts and re.match(r'^[A-Za-z]:', parts[0]))
                       or stat.S_ISLNK(i.external_attr >> 16))
+            parts = [safe_part(x) for x in parts]
             target = root.joinpath(*parts) if parts else root
             if unsafe or (parts and not str(target.resolve()).startswith(str(root) + os.sep)):
                 skipped.append(i.filename)
                 continue
-            if i.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with z.open(i) as src, open(target, 'wb') as out:
-                shutil.copyfileobj(src, out, MB)
+            try:
+                if i.is_dir():
+                    os.makedirs(long_path(target), exist_ok=True)
+                    continue
+                os.makedirs(long_path(target.parent), exist_ok=True)
+                with z.open(i) as src, open(long_path(target), 'wb') as out:
+                    shutil.copyfileobj(src, out, MB)
+            except OSError as e:
+                skipped.append(f'{i.filename} ({e.strerror or e})')
     return f'unzipped {size_str(total)} into {dest.name}/', skipped
 
 
@@ -956,7 +984,11 @@ def download_release(web, rel, base, name, cap):
         if x.get('size') is not None and x['size'] > left:
             res['skipped'].append(f"{fname} ({size_str(x['size'])}, over --max-size)")
             continue
-        dest = folder / fname
+        dest, n = folder / fname, 1
+        while dest.exists():                     # two assets that clean up to the same name
+            n += 1
+            dest = folder / f'{Path(fname).stem}-{n}{Path(fname).suffix}'
+        fname = dest.name
         note(f'downloading {fname}')
         try:
             got = web.download(x['url'], dest, left)
@@ -1438,7 +1470,7 @@ def prep(d, base, a, source, notes=None):
             F['download'] = {'why': why, **download_release(web, rel, base, clone.name, a.max_size)}
             for x in F['download']['files']:
                 if x.get('unsafe_paths_skipped'):
-                    warn(f"{x['name']} has unsafe paths (zip-slip or symlinks), skipped: {', '.join(x['unsafe_paths_skipped'][:3])}")
+                    warn(f"{x['name']}: some files were not unzipped (unsafe paths, symlinks or names that can't be written): {', '.join(x['unsafe_paths_skipped'][:3])}")
 
     F['requests'] = {'code_hosts': web.calls, 'github_left': web.github_left, 'github_token': bool(web.github_token)}
     if web.github_left is not None and web.github_left < 10 and not web.github_token:

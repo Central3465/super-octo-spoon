@@ -735,14 +735,16 @@ def cmd_run(a):
         (QUEUE / name).mkdir(exist_ok=True)
     if runner_alive():
         raise SystemExit('a runner is already going (send-queue/runner.pid). One at a time.')
-    (QUEUE / 'runner.pid').write_text(str(os.getpid()), encoding='utf-8')
     a.send, a.offline = True, False
-    base, api, writer = setup(a, from_desk=a.from_desk)
+    base, api, writer = setup(a, from_desk=a.from_desk)     # before the pid file: a bad token leaves nothing behind
+    (QUEUE / 'every').unlink(missing_ok=True)       # a stop or pause left from a runner that already ended
+    (QUEUE / 'runner.pid').write_text(str(os.getpid()), encoding='utf-8')
     held = {}            # sid -> time we claimed it
     beat_fails = {}      # sid -> heartbeats in a row that failed
     paused = False
     last_send = None
     last_beat = 0.0
+    last_status = 0.0
 
     def say(msg):
         print(f'\r{" " * 70}\r{time.strftime("%H:%M:%S")}  {msg}', flush=True)
@@ -834,7 +836,8 @@ def cmd_run(a):
             if interactive:
                 print(f'\r  {len(files)} queued, {len(held)} claimed, every {a.every:g} min, {state}  '
                       f'(type minutes or p + Enter)   ', end='', flush=True)
-            elif int(time.time()) % 30 == 0:
+            elif time.time() - last_status >= 30:
+                last_status = time.time()
                 print(f'  {len(files)} queued, {len(held)} claimed, every {a.every:g} min, {state}', flush=True)
             # live controls: type a number + Enter to change the gap, p + Enter to pause or resume.
             # `terra-write.py every MIN` from another terminal does the same through send-queue/every
