@@ -98,10 +98,13 @@ def md(text):
     return ''.join(out)
 
 
-def card(title, body, right='', tint=BLUE):
-    """A section of the review page with a coloured title."""
-    return (f'<section class="rp-card" style="--tint:{tint}"><h3 class="rp-title">{e(title)}'
-            + (f' <span class="rp-right">{right}</span>' if right else '') + f'</h3>{body}</section>')
+def card(title, body, right='', tint=BLUE, folded=False):
+    """A section of the review page with a coloured title. folded: shown closed (click the title to open it)."""
+    head = f'{e(title)}' + (f' <span class="rp-right">{right}</span>' if right else '')
+    if folded:
+        return (f'<details class="rp-card" style="--tint:{tint}"><summary class="rp-title">{head}</summary>'
+                f'<div class="rp-body">{body}</div></details>')
+    return f'<section class="rp-card" style="--tint:{tint}"><h3 class="rp-title">{head}</h3>{body}</section>'
 
 
 def chip(text, color):
@@ -133,6 +136,7 @@ def render(d, checks=None, images=None, checking=False):
                  f' · shipped {ago(s.get("submittedAt"))} · {" ".join(e(x) for x in s.get("platforms") or [])}</p>'
                  f'<p>{" ".join(chips)}</p>')
 
+    parts.append(glance(d, checks, checking))
     parts.append(checks_card(checks, checking))
 
     # project + ship notes
@@ -183,7 +187,7 @@ def render(d, checks=None, images=None, checking=False):
             body += (f'<p><b>{e(x.get("verdict"))}</b> {e(x.get("stars"))}/7 <span style="color:{C["dim"]}">{ago(x.get("createdAt"))}</span><br>'
                      f'{md(x.get("justification"))}</p>')
         right = f'{v.get("averageStars") or 0:.1f} stars avg' + (f', suggests x{v["suggestedMultiplier"]:.2f}' if v.get('suggestedMultiplier') else '')
-        parts.append(card(f'Community votes (round {v.get("round")})', body, right, LILAC))
+        parts.append(card(f'Community votes (round {v.get("round")})', body, right, LILAC, folded=True))
 
     # previous decisions
     decs = sorted(d.get('decisions') or [], key=lambda x: x.get('createdAt') or x.get('claimedAt') or '', reverse=True)
@@ -224,7 +228,10 @@ def render(d, checks=None, images=None, checking=False):
         if crow:
             body += f'<table cellpadding="2" style="margin-left:12px">{crow}</table>'
         body += f'<hr style="color:{C["line"]}">'
-    parts.append(card('Devlogs and commits', body or f'<span style="color:{C["dim"]}">no devlogs</span>', tint=MINT))
+    n_dl = len(d.get('devlogs') or [])
+    parts.append(card('Devlogs and commits', body or f'<span style="color:{C["dim"]}">no devlogs</span>',
+                      f'{n_dl} devlog{"" if n_dl == 1 else "s"}, {len(commits)} commit{"" if len(commits) == 1 else "s"}',
+                      tint=MINT, folded=n_dl > 0))
 
     # files
     files = sorted(ev.get('files') or [], key=lambda f: -(f.get('seconds') or 0))
@@ -236,16 +243,38 @@ def render(d, checks=None, images=None, checking=False):
         if out:
             html_ += '<p><b>Not in the repo</b></p><table cellpadding="2">' + ''.join(
                 f'<tr><td>{e(f["path"])}</td><td style="color:{C["dim"]}">{e(f.get("status"))} · {hrs(f["seconds"])}</td></tr>' for f in out[:12]) + '</table>'
-        parts.append(card('Files', html_, f'{hrs(sum(f.get("seconds") or 0 for f in inrepo))} in the repo'))
+        parts.append(card('Files', html_, f'{hrs(sum(f.get("seconds") or 0 for f in inrepo))} in the repo', folded=True))
 
     # other programs
     up = ev.get('unifiedProjects') or []
     if up:
         body = ''.join(f'<p>{e(x.get("program"))}: {e(x.get("hours"))}h · <a href="{e(x.get("codeUrl"))}">{e(x.get("codeUrl"))}</a>'
                        f' <span style="color:{C["dim"]}">{when(x.get("approvedAt"))}</span></p>' for x in up)
-        parts.append(card('Same project in other programs', body, tint=LILAC))
+        parts.append(card('Same project in other programs', body, f'{len(up)} found', tint=LILAC, folded=True))
     parts.append('</div>')
     return ''.join(parts)
+
+
+def glance(d, checks=None, checking=False):
+    """The numbers a reviewer looks at first, in one row: hours, AI, flags, checks, earlier decisions."""
+    s, ev = d.get('shipment') or {}, (d.get('evidence') or {}).get('data') or {}
+    t = ev.get('time') or {}
+    tracked = s.get('hackatimeSeconds') or t.get('totalSeconds') or 0
+    ai = s.get('aiSeconds') or t.get('aiSeconds') or 0
+    credited = sum(x.get('creditedSeconds') or 0 for x in d.get('devlogs') or [])
+    flags = [f for f in d.get('flags') or [] if not f.get('dismissedAt')]
+    danger = sum(1 for f in flags if f.get('severity') == 'danger')
+    fraud = (d.get('fraudSuggestion') or {}).get('seconds')
+    level = (checks or {}).get('level')
+    tiles = [('Tracked', hrs(tracked), ''), ('Credited', hrs(credited), ''),
+             ('AI time', f'{hrs(ai)}' + (f' ({ai / tracked:.0%})' if tracked and ai else ''), 'warn' if tracked and ai / tracked >= .3 else ''),
+             ('Flags', f'{len(flags)}' + (f' ({danger} danger)' if danger else ''), 'bad' if danger else 'warn' if flags else ''),
+             ('Fraud suggests', f'cut {hrs(fraud)}' if fraud else 'nothing', 'warn' if fraud else ''),
+             ('Checks', 'running…' if checking and not checks else {'ok': 'look fine', 'warn': 'worth a look', 'bad': 'problems'}.get(level, 'not yet'),
+              level if level in ('warn', 'bad') else 'ok' if level == 'ok' else ''),
+             ('Earlier decisions', str(len(d.get('decisions') or [])), 'warn' if d.get('decisions') else '')]
+    return '<div class="rp-glance">' + ''.join(
+        f'<div class="rp-tile {cls}"><span>{e(label)}</span><b>{e(val)}</b></div>' for label, val, cls in tiles) + '</div>'
 
 
 ICON = {'ok': ('✓', C['green']), 'warn': ('⚠', C['yellow']), 'bad': ('✗', C['red'])}

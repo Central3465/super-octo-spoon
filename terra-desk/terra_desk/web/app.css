@@ -240,3 +240,50 @@ details.example pre { background: var(--code-bg); padding: 10px 12px; border-rad
   .editor { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr; }
 }
+
+/* ---- cleaner review: summaries, folded sections, a bar that stays in reach ---- */
+.rp-glance { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.rp-tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; }
+.rp-tile span { font-size: 12.5px; color: var(--muted); font-weight: 600; }
+.rp-tile b { font-size: 16px; }
+.rp-tile.warn { border-color: color-mix(in srgb, var(--yellow) 45%, var(--line)); }
+.rp-tile.warn b { color: var(--yellow); }
+.rp-tile.bad { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+.rp-tile.bad b { color: var(--red); }
+.rp-tile.ok b { color: var(--green); }
+details.rp-card > summary { cursor: pointer; list-style: none; margin: 0; }
+details.rp-card > summary::-webkit-details-marker { display: none; }
+details.rp-card > summary::before { content: '▸'; color: var(--muted); margin-right: 4px; transition: transform .15s; display: inline-block; }
+details.rp-card[open] > summary::before { transform: rotate(90deg); }
+details.rp-card:not([open]) > summary { margin-bottom: 0; }
+.rp-body { padding-top: 4px; }
+
+.steps button.done:not(.on) .num { background: var(--green); color: #fff; border-color: var(--green); }
+.steps button.done .num { font-size: 0; }
+.steps button.done .num::after { content: '✓'; font-size: 13px; }
+
+details.section.fold > summary { display: flex; align-items: center; gap: 14px; cursor: pointer; list-style: none; }
+details.section.fold > summary::-webkit-details-marker { display: none; }
+details.section.fold > summary h2::before { content: '▸ '; color: var(--muted); }
+details.section.fold[open] > summary h2::before { content: '▾ '; }
+details.section.fold:not([open]) { gap: 0; }
+details.notice > summary { cursor: pointer; }
+
+.segmented { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--surface); border: 1px solid var(--line);
+             border-radius: var(--radius); padding: 12px 16px; }
+.seg-label { font-weight: 600; color: var(--muted); margin-right: 6px; }
+.segmented button { border-radius: 999px; }
+.segmented button.on { background: color-mix(in srgb, var(--tint) 14%, var(--surface)); border-color: var(--tint); color: var(--tint); font-weight: 600; }
+
+.sendbar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+           background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 18px;
+           box-shadow: 0 -6px 24px rgb(0 0 0 / .08); }
+.menu.up { top: auto; bottom: calc(100% + 6px); }
+.menu .item.danger { color: var(--red); }
+
+.dropzone { border: 2px dashed var(--line); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; background: var(--surface-2); }
+.dropzone.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.ship-head .row .link { font-size: 14px; }
+.ship-head h1 + .meta { margin-bottom: 8px; }
+.steps button { display: inline-flex; align-items: center; white-space: nowrap; }
+.steps button .num { flex: none; line-height: 1; }

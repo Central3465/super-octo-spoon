@@ -882,3 +882,94 @@ def test_move_verdict_and_rubric(cfg, monkeypatch):
     changes = core.template('changes', '@me')
     assert len(core.template_problems(changes)) == 3          # the liked-thing line and both numbered problems
     assert core.template_problems('### What to change\nthe boss fight is really cool\n1. add a release. build it') == []
+
+
+def load_api(tmp_path, monkeypatch):
+    import runpy
+    monkeypatch.setenv('TERRA_DATA_DIR', str(tmp_path))
+    return runpy.run_path(str(Path(__file__).resolve().parent.parent / 'tools/terra-api.py'), run_name='td')
+
+
+def test_failed_download_leaves_no_file(tmp_path, monkeypatch):
+    A = load_api(tmp_path, monkeypatch)
+    web = A['Web']()
+
+    class Broken:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            raise OSError('connection reset')
+    web.open = lambda url, accept=None: Broken()
+    dest = tmp_path / 'game.zip'
+    with pytest.raises(A['WebError']):
+        web.download('https://github.com/x/y/releases/download/v1/game.zip', dest, 10 * 1024 * 1024)
+    assert not dest.exists()                    # an empty file here used to make every retry fail
+
+
+def test_unzip_cleans_up_names_and_keeps_going(tmp_path, monkeypatch):
+    import zipfile
+    A = load_api(tmp_path, monkeypatch)
+    z = tmp_path / 'build.zip'
+    with zipfile.ZipFile(z, 'w') as f:
+        f.writestr('game/game.exe', b'MZ')
+        f.writestr('__MACOSX/game/._game.exe', b'junk')
+        f.writestr('game/.DS_Store', b'junk')
+        f.writestr('game/Icon\r', b'mac folder icon')
+        f.writestr('../evil.txt', b'no')
+    msg, skipped = A['unzip'](z, tmp_path / 'out', 10 * 1024 * 1024)
+    out = tmp_path / 'out'
+    assert 'unzipped' in msg and (out / 'game' / 'game.exe').exists()
+    assert not (out / '__MACOSX').exists() and not (out / 'game' / '.DS_Store').exists()
+    assert (out / 'game' / 'Icon_').exists() and '../evil.txt' in skipped
+    if os.name == 'nt':
+        assert A['safe_part']('con.txt') == '_con.txt' and A['safe_part']('a:b?.') == 'a_b_'
+
+
+def test_failed_sends_show_and_retry(cfg):
+    from terra_desk import core, server
+    desk = server.Desk(cfg)
+    call = server.test_client(desk)
+    failed = core.queue_dir(cfg) / 'failed'
+    failed.mkdir(parents=True)
+    (failed / f'2026-{SID}.json').write_text(json.dumps({'sid': SID, 'title': 'Space Game (sam)', 'verdict': 'approve'}))
+    (failed / f'2026-{SID}.why.txt').write_text('the evidence version changed\n')
+    assert call('GET', '/api/state')[1]['status']['failed'] == 1
+    got = call('GET', '/api/failed')[1]['failed']
+    assert got == [{'name': f'2026-{SID}.json', 'sid': SID, 'title': 'Space Game (sam)', 'verdict': 'approve',
+                    'why': 'the evidence version changed'}]
+    assert call('POST', '/api/failed', {'name': '../../x.json'})[0] == 400
+    call('POST', '/api/failed', {'name': f'2026-{SID}.json', 'retry': True})
+    assert SID in core.queued_sids(cfg) and not list(failed.iterdir())
+    before = core.send_marks(cfg)
+    core.unqueue(cfg, core.Ship(SID))
+    assert core.send_marks(cfg) != before       # the app notices the sender's work and refreshes
+
+
+def test_video_from_clipboard_keeps_your_file(cfg, monkeypatch, tmp_path):
+    from terra_desk import core, server, system
+    monkeypatch.setattr(core, 'compress_video', lambda src, dest, limit=core.VIDEO_LIMIT: (Path(dest).write_bytes(b'mp4'), dest)[1])
+    desk = server.Desk(cfg)
+    call = server.test_client(desk)
+    desk.store.sync_queue({SID: queue_item()})
+    desk.reload()
+    rec = tmp_path / 'My recording.mp4'
+    rec.write_bytes(b'video')
+    monkeypatch.setattr(system, 'clipboard_paths', lambda: [str(tmp_path / 'notes.txt')])
+    (tmp_path / 'notes.txt').write_text('x')
+    code, r = call('POST', f'/api/ship/{SID}/video-clipboard')
+    assert code == 400 and 'not a video' in r['error']
+    monkeypatch.setattr(system, 'clipboard_paths', lambda: [])
+    assert 'No video file on the clipboard' in call('POST', f'/api/ship/{SID}/video-clipboard')[1]['error']
+    monkeypatch.setattr(system, 'clipboard_paths', lambda: [str(rec)])
+    assert call('POST', f'/api/ship/{SID}/video-clipboard')[0] == 200
+    for _ in range(200):
+        if desk.store.work(SID).get('video'):
+            break
+        time.sleep(0.02)
+    assert Path(desk.store.work(SID)['video']).name == f'{SID}.mp4' and rec.exists()      # your own file stays
